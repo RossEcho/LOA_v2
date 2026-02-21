@@ -34,15 +34,31 @@ def _expect_type(name: str, value, typ) -> None:
 
 
 def _validate_against_schema(plan: dict) -> None:
-    try:
-        import jsonschema
-    except Exception:
+    if not isinstance(plan, dict):
+        raise PlanValidationError("schema validation failed: plan must be object")
+
+    allowed_top = {"plan_id", "session_name", "steps", "final_output", "notes"}
+    extra_top = set(plan.keys()) - allowed_top
+    if extra_top:
+        keys = ", ".join(sorted(extra_top))
+        raise PlanValidationError(f"schema validation failed: unknown top-level fields: {keys}")
+
+    steps = plan.get("steps")
+    if steps is None:
         return
-    schema = load_plan_schema()
-    try:
-        jsonschema.validate(instance=plan, schema=schema)
-    except jsonschema.ValidationError as exc:
-        raise PlanValidationError(f"schema validation failed: {exc.message}") from exc
+    if not isinstance(steps, list):
+        raise PlanValidationError("schema validation failed: steps must be array")
+
+    allowed_step = {"id", "tool", "args", "timeout_sec", "outputs"}
+    for idx, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            raise PlanValidationError(f"schema validation failed: steps[{idx}] must be object")
+        extra_step = set(step.keys()) - allowed_step
+        if extra_step:
+            keys = ", ".join(sorted(extra_step))
+            raise PlanValidationError(
+                f"schema validation failed: steps[{idx}] unknown fields: {keys}"
+            )
 
 
 def validate_plan(plan: dict, *, for_execution: bool) -> None:
