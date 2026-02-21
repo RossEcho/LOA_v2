@@ -1,0 +1,8 @@
+Tool: ping
+Purpose: Check host reachability and latency.
+Args:
+- target (string, required): hostname or IP
+- count (int, optional): number of packets, default 4
+Execution:
+Call wrapper: tools/ping.sh <target> <count>
+If target missing/invalid -> {"tool":"none"}

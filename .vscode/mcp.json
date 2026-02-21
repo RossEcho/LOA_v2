@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "problem99": {
+      "type": "http",
+      "url": "https://mcp.problem99.io/mcp",
+      "headers": {
+        "Authorization": "Bearer sk_live_p99_b30c5f69e8e96da24d171d83bc35abb1c97afaa1f79d4fa9"
+      }
+    }
+  },
+  "inputs": []
+}

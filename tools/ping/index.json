@@ -1,0 +1,4 @@
+[
+  {"name":"ping","desc":"Check reachability/latency to a host. args: target, count"},
+  {"name":"none","desc":"No tool fits; respond tool:none"}
+]

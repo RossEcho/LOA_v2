@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LOA Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["plan_id", "session_name", "steps", "final_output"],
+  "properties": {
+    "plan_id": {"type": "string", "minLength": 1},
+    "session_name": {"type": "string", "minLength": 1, "maxLength": 80},
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "tool", "args"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "tool": {"type": "string", "minLength": 1},
+          "args": {"type": "object"},
+          "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 3600},
+          "outputs": {
+            "type": "object",
+            "additionalProperties": {"type": "string"}
+          }
+        }
+      }
+    },
+    "final_output": {"type": "string", "minLength": 1},
+    "notes": {"type": "string"}
+  }
+}
