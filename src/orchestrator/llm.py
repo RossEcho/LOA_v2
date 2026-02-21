@@ -72,33 +72,30 @@ def run_llm_json(
     ]
 
     schema_flag = os.getenv("LOA_LLAMA_SCHEMA_FLAG", "--json-schema")
-    prompt_flag = os.getenv("LOA_LLAMA_PROMPT_FLAG", "--prompt")
 
-    cmd_prompt = base_cmd + [prompt_flag, prompt]
-    cmd_prompt_with_schema = cmd_prompt + [schema_flag, str(schema)]
+    temp_dir = tempfile.mkdtemp(prefix="loa_prompt_")
+    prompt_file = Path(temp_dir) / "prompt.txt"
+    prompt_file.write_text(prompt, encoding="utf-8")
+    cmd = base_cmd + ["-f", str(prompt_file)]
 
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".txt") as file:
-        file.write(prompt)
-        prompt_file = file.name
-
-    cmd_file = base_cmd + ["-f", prompt_file]
-    cmd_file_with_schema = cmd_file + [schema_flag, str(schema)]
-
-    try:
-        try:
-            raw = _run_cli(cmd_prompt_with_schema, timeout_sec=timeout_sec)
-        except Exception:
-            try:
-                raw = _run_cli(cmd_prompt, timeout_sec=timeout_sec)
-            except Exception:
-                try:
-                    raw = _run_cli(cmd_file_with_schema, timeout_sec=timeout_sec)
-                except Exception:
-                    raw = _run_cli(cmd_file, timeout_sec=timeout_sec)
-    finally:
+    def _cleanup() -> None:
         try:
             os.unlink(prompt_file)
         except OSError:
             pass
+        try:
+            os.rmdir(temp_dir)
+        except OSError:
+            pass
+
+    cmd_with_schema = cmd + [schema_flag, str(schema)]
+
+    try:
+        try:
+            raw = _run_cli(cmd_with_schema, timeout_sec=timeout_sec)
+        except Exception:
+            raw = _run_cli(cmd, timeout_sec=timeout_sec)
+    finally:
+        _cleanup()
 
     return _extract_json_object(raw)

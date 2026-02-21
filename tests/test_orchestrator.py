@@ -32,6 +32,44 @@ class TestOrchestratorPlannerValidation(unittest.TestCase):
         with self.assertRaises(PlanValidationError):
             validate_plan(plan, for_execution=True)
 
+    def test_outputs_rejects_runtime_claim_keys(self):
+        plan = {
+            "plan_id": "p3",
+            "session_name": "x",
+            "steps": [
+                {
+                    "id": "s1",
+                    "tool": "ping",
+                    "args": {"target": "8.8.8.8"},
+                    "outputs": {"latency_ms": "42"},
+                }
+            ],
+            "final_output": "final.json",
+        }
+        with self.assertRaises(PlanValidationError):
+            validate_plan(plan, for_execution=False)
+
+    def test_outputs_accepts_expected_artifact_paths(self):
+        plan = {
+            "plan_id": "p4",
+            "session_name": "x",
+            "steps": [
+                {
+                    "id": "s1",
+                    "tool": "ping",
+                    "args": {"target": "8.8.8.8"},
+                    "outputs": {
+                        "stdout_file": "steps/step_001_ping/stdout.txt",
+                        "stderr_file": "steps/step_001_ping/stderr.txt",
+                        "exit_code_file": "steps/step_001_ping/exit_code.txt",
+                        "timing_file": "steps/step_001_ping/timing.json",
+                    },
+                }
+            ],
+            "final_output": "final.json",
+        }
+        validate_plan(plan, for_execution=False)
+
 
 class TestToolRegistryValidation(unittest.TestCase):
     def test_ping_args_validation(self):

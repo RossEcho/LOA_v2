@@ -20,7 +20,13 @@
           "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 3600},
           "outputs": {
             "type": "object",
-            "additionalProperties": {"type": "string"}
+            "additionalProperties": false,
+            "properties": {
+              "stdout_file": {"type": "string", "minLength": 1},
+              "stderr_file": {"type": "string", "minLength": 1},
+              "exit_code_file": {"type": "string", "minLength": 1},
+              "timing_file": {"type": "string", "minLength": 1}
+            }
           }
         }
       }

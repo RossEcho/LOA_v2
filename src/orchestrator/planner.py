@@ -50,6 +50,7 @@ def _validate_against_schema(plan: dict) -> None:
         raise PlanValidationError("schema validation failed: steps must be array")
 
     allowed_step = {"id", "tool", "args", "timeout_sec", "outputs"}
+    allowed_outputs = {"stdout_file", "stderr_file", "exit_code_file", "timing_file"}
     for idx, step in enumerate(steps, start=1):
         if not isinstance(step, dict):
             raise PlanValidationError(f"schema validation failed: steps[{idx}] must be object")
@@ -59,6 +60,16 @@ def _validate_against_schema(plan: dict) -> None:
             raise PlanValidationError(
                 f"schema validation failed: steps[{idx}] unknown fields: {keys}"
             )
+        outputs = step.get("outputs")
+        if outputs is not None:
+            if not isinstance(outputs, dict):
+                raise PlanValidationError(f"schema validation failed: steps[{idx}].outputs must be object")
+            extra_out = set(outputs.keys()) - allowed_outputs
+            if extra_out:
+                keys = ", ".join(sorted(extra_out))
+                raise PlanValidationError(
+                    f"schema validation failed: steps[{idx}].outputs unknown fields: {keys}"
+                )
 
 
 def validate_plan(plan: dict, *, for_execution: bool) -> None:
@@ -115,11 +126,16 @@ def validate_plan(plan: dict, *, for_execution: bool) -> None:
         outputs = step.get("outputs")
         if outputs is not None:
             _expect_type(f"steps[{idx}].outputs", outputs, dict)
+            allowed_output_keys = {"stdout_file", "stderr_file", "exit_code_file", "timing_file"}
             for key, value in outputs.items():
-                if not isinstance(key, str) or not key:
-                    raise PlanValidationError(f"steps[{idx}].outputs contains invalid key")
+                if key not in allowed_output_keys:
+                    raise PlanValidationError(f"steps[{idx}].outputs contains invalid key: {key}")
                 if not isinstance(value, str) or not value.strip():
                     raise PlanValidationError(f"steps[{idx}].outputs[{key}] must be non-empty string")
+                if not value.startswith("steps/"):
+                    raise PlanValidationError(
+                        f"steps[{idx}].outputs[{key}] must be an expected artifact path under steps/"
+                    )
 
     notes = plan.get("notes")
     if notes is not None and not isinstance(notes, str):
@@ -146,6 +162,9 @@ def _planner_prompt(user_prompt: str, tools_meta: list[dict]) -> str:
             "Only use tools listed in tools_meta.",
             "Use steps only when a tool is required.",
             "Prefer minimal step count.",
+            "Plan includes only tool choices and arguments; never include execution results.",
+            "Do not output latency, reachability, success/failure, or any measured runtime values.",
+            "If outputs is included, it may contain only expected artifact file paths under steps/ using keys: stdout_file, stderr_file, exit_code_file, timing_file.",
             "Set final_output to final.json unless caller requires a different extension.",
         ],
         "utc_now": datetime.now(timezone.utc).isoformat(),
