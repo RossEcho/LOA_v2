@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.orchestrator.llm import LLMError, run_llm_json
+from src.orchestrator.llm import LLMError, extract_json_object, run_llm_text
 from src.orchestrator.tools import REGISTRY, list_planning_tools, validate_tool_args
 
 SCHEMA_PATH = Path(__file__).with_name("plan.schema.json")
@@ -159,6 +159,9 @@ def _planner_prompt(user_prompt: str, tools_meta: list[dict]) -> str:
         "task": "Generate a deterministic tool execution plan.",
         "requirements": [
             "Return only one JSON object. No markdown. No prose.",
+            "Do not use markdown code fences or ```json blocks.",
+            "Do not add explanations before or after JSON.",
+            "If unable to comply, return exactly: {\"error\":\"cannot_comply\"}",
             "Only use tools listed in tools_meta.",
             "Use steps only when a tool is required.",
             "Prefer minimal step count.",
@@ -182,20 +185,25 @@ def generate_plan(
     n_ctx: int = 2048,
     temp: float = 0.0,
     seed: int = 0,
+    llm_log_dir: str | Path | None = None,
 ) -> dict:
     tools_meta = list_planning_tools()
     prompt = _planner_prompt(user_prompt=user_prompt, tools_meta=tools_meta)
     try:
-        plan = run_llm_json(
+        text = run_llm_text(
             prompt,
             SCHEMA_PATH,
             model_path=model_path,
             n_ctx=n_ctx,
             temp=temp,
             seed=seed,
+            log_dir=llm_log_dir,
         )
+        plan = extract_json_object(text)
         if not isinstance(plan, dict):
             raise LLMError("model returned non-object")
+        if plan.get("error") == "cannot_comply":
+            raise LLMError("model returned cannot_comply")
         validate_plan(plan, for_execution=False)
         if not plan.get("plan_id"):
             plan["plan_id"] = f"plan_{uuid.uuid4().hex[:12]}"

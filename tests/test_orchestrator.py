@@ -100,7 +100,7 @@ class TestExecutorStructure(unittest.TestCase):
             self.assertTrue((session_dir / "steps").exists())
             self.assertTrue((session_dir / "final.json").exists())
             self.assertEqual(result["steps_executed"], 0)
-            self.assertTrue(result["success"])
+            self.assertFalse(result["success"])
 
 
 if __name__ == "__main__":

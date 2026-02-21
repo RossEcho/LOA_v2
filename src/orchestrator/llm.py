@@ -13,20 +13,70 @@ class LLMError(RuntimeError):
     pass
 
 
-def _extract_json_object(text: str) -> dict:
-    decoder = json.JSONDecoder()
-    for idx, char in enumerate(text):
-        if char != "{":
+def extract_json_object(text: str) -> dict:
+    if not isinstance(text, str) or not text.strip():
+        raise LLMError("model output did not contain a valid JSON object")
+
+    start = text.find("{")
+    if start < 0:
+        raise LLMError("model output did not contain a valid JSON object")
+
+    in_string = False
+    escaped = False
+    depth = 0
+
+    for idx in range(start, len(text)):
+        char = text[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char == '"':
+                in_string = False
             continue
-        try:
-            obj, end = decoder.raw_decode(text[idx:])
-        except json.JSONDecodeError:
+
+        if char == '"':
+            in_string = True
             continue
-        if isinstance(obj, dict):
-            trailing = text[idx + end :].strip()
-            if not trailing:
-                return obj
+        if char == "{":
+            depth += 1
+            continue
+        if char == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start : idx + 1]
+                try:
+                    parsed = json.loads(candidate)
+                except json.JSONDecodeError as exc:
+                    raise LLMError("model output did not contain a valid JSON object") from exc
+                if not isinstance(parsed, dict):
+                    raise LLMError("model output JSON is not an object")
+                return parsed
+
     raise LLMError("model output did not contain a valid JSON object")
+
+
+def _write_llm_logs(log_dir: Path | None, response_payload, text: str) -> None:
+    if log_dir is None:
+        return
+    log_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = log_dir / "llm_raw_response.json"
+    text_path = log_dir / "llm_text.txt"
+
+    if isinstance(response_payload, (dict, list)):
+        raw_path.write_text(json.dumps(response_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    else:
+        raw_path.write_text(
+            json.dumps({"raw": str(response_payload)}, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    text_path.write_text(text or "", encoding="utf-8")
+
+    if os.getenv("LOA_DEBUG_LLM", "0") == "1":
+        print("\n[LOA_DEBUG_LLM] Extracted LLM text:\n")
+        print(text)
 
 
 def _run_cli(argv: list[str], timeout_sec: int) -> str:
@@ -51,7 +101,7 @@ def _run_cli(argv: list[str], timeout_sec: int) -> str:
     return output
 
 
-def _run_server(prompt: str, schema_path: Path, timeout_sec: int, temp: float, seed: int) -> str:
+def _run_server(prompt: str, schema_path: Path, timeout_sec: int, temp: float, seed: int) -> tuple[dict, str]:
     endpoint = os.getenv("LOA_LLAMA_SERVER_URL", "http://127.0.0.1:8080/v1/chat/completions")
     max_tokens = int(os.getenv("LOA_LLM_MAX_TOKENS", "512"))
     model_name = os.getenv("LOA_LLAMA_SERVER_MODEL", "local")
@@ -91,17 +141,30 @@ def _run_server(prompt: str, schema_path: Path, timeout_sec: int, temp: float, s
 
     try:
         data = json.loads(body)
-        content = data["choices"][0]["message"]["content"]
+    except json.JSONDecodeError as exc:
+        raise LLMError("llm server response is not valid JSON") from exc
+
+    try:
+        choices = data["choices"]
+        first = choices[0]
     except Exception as exc:
         raise LLMError("llm server response not in chat completions format") from exc
+
+    content = None
+    if isinstance(first, dict):
+        message = first.get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+        if not content:
+            content = first.get("text")
 
     if not isinstance(content, str) or not content.strip():
         raise LLMError("llm server returned empty content")
 
-    return content
+    return data, content
 
 
-def _run_cli_json(prompt: str, schema_path: Path, model_path: str, n_ctx: int, temp: float, seed: int) -> str:
+def _run_cli_text(prompt: str, schema_path: Path, model_path: str, n_ctx: int, temp: float, seed: int) -> tuple[dict, str]:
     bin_path = Path(os.path.expanduser(os.getenv("LOA_LLAMA_CLI_BIN", "llama-cli")))
     timeout_sec = int(os.getenv("LOA_LLM_TIMEOUT_SEC", "90"))
     prompt_max_chars = int(os.getenv("LOA_LLM_PROMPT_MAX_CHARS", "4000"))
@@ -156,10 +219,10 @@ def _run_cli_json(prompt: str, schema_path: Path, model_path: str, n_ctx: int, t
         if cleanup is not None:
             cleanup()
 
-    return raw
+    return {"backend": "cli", "stdout": raw}, raw
 
 
-def run_llm_json(
+def run_llm_text(
     prompt: str,
     schema_path: str | Path,
     *,
@@ -167,15 +230,23 @@ def run_llm_json(
     n_ctx: int,
     temp: float,
     seed: int,
-) -> dict:
+    log_dir: str | Path | None = None,
+) -> str:
     schema = Path(schema_path).resolve()
     backend = os.getenv("LOA_LLM_BACKEND", "server").strip().lower()
     timeout_sec = int(os.getenv("LOA_LLM_TIMEOUT_SEC", "90"))
+    resolved_log_dir = Path(log_dir).resolve() if log_dir else None
 
     if backend == "server":
-        raw = _run_server(prompt=prompt, schema_path=schema, timeout_sec=timeout_sec, temp=temp, seed=seed)
+        raw_payload, text = _run_server(
+            prompt=prompt,
+            schema_path=schema,
+            timeout_sec=timeout_sec,
+            temp=temp,
+            seed=seed,
+        )
     elif backend == "cli":
-        raw = _run_cli_json(
+        raw_payload, text = _run_cli_text(
             prompt=prompt,
             schema_path=schema,
             model_path=model_path,
@@ -186,4 +257,27 @@ def run_llm_json(
     else:
         raise LLMError(f"unsupported LOA_LLM_BACKEND: {backend}")
 
-    return _extract_json_object(raw)
+    _write_llm_logs(resolved_log_dir, raw_payload, text)
+    return text
+
+
+def run_llm_json(
+    prompt: str,
+    schema_path: str | Path,
+    *,
+    model_path: str,
+    n_ctx: int,
+    temp: float,
+    seed: int,
+    log_dir: str | Path | None = None,
+) -> dict:
+    text = run_llm_text(
+        prompt,
+        schema_path,
+        model_path=model_path,
+        n_ctx=n_ctx,
+        temp=temp,
+        seed=seed,
+        log_dir=log_dir,
+    )
+    return extract_json_object(text)

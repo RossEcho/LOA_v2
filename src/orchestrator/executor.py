@@ -170,11 +170,19 @@ def execute_plan(plan: dict, session_dir: Path) -> dict:
             break
 
     total_elapsed = time.perf_counter() - started
-    success = all(item["exit_code"] == 0 for item in results) and len(results) == len(plan["steps"])
+    has_planner_failure = isinstance(plan.get("notes"), str) and plan.get("notes", "").startswith("planner_failed:")
+    success = (
+        len(plan["steps"]) > 0
+        and len(results) > 0
+        and all(item["exit_code"] == 0 for item in results)
+        and len(results) == len(plan["steps"])
+        and not has_planner_failure
+    )
     final = {
         "plan_id": plan["plan_id"],
         "session_name": plan["session_name"],
         "success": success,
+        "notes": plan.get("notes"),
         "steps_total": len(plan["steps"]),
         "steps_executed": len(results),
         "elapsed_sec": total_elapsed,

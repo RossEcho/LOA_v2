@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.orchestrator.executor import build_meta, create_session_dir, execute_plan, write_plan_and_meta
-from src.orchestrator.planner import generate_plan, validate_plan
+from src.orchestrator.planner import generate_plan, sanitize_session_name, validate_plan
 
 
 def _config_path() -> Path:
@@ -106,10 +106,18 @@ def _session_from_prompt(prompt: str, yes: bool) -> int:
     temp = float(os.getenv("LOA_TEMP", "0"))
     seed = int(os.getenv("LOA_SEED", "0"))
 
-    plan = generate_plan(prompt, model_path=model_path, n_ctx=n_ctx, temp=temp, seed=seed)
-    validate_plan(plan, for_execution=False)
+    session_seed = sanitize_session_name((prompt or "session")[:80])
+    session_dir = create_session_dir(session_seed)
 
-    session_dir = create_session_dir(plan["session_name"])
+    plan = generate_plan(
+        prompt,
+        model_path=model_path,
+        n_ctx=n_ctx,
+        temp=temp,
+        seed=seed,
+        llm_log_dir=session_dir,
+    )
+    validate_plan(plan, for_execution=False)
     meta = build_meta(model_path=model_path, n_ctx=n_ctx, temp=temp, seed=seed)
     write_plan_and_meta(session_dir, plan, meta)
 
