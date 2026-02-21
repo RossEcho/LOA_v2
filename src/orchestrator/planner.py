@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import importlib
 import re
 import uuid
 from datetime import datetime, timezone
@@ -35,10 +34,10 @@ def _expect_type(name: str, value, typ) -> None:
 
 
 def _validate_against_schema(plan: dict) -> None:
-    module = importlib.util.find_spec("jsonschema")
-    if module is None:
+    try:
+        import jsonschema
+    except Exception:
         return
-    jsonschema = importlib.import_module("jsonschema")
     schema = load_plan_schema()
     try:
         jsonschema.validate(instance=plan, schema=schema)
