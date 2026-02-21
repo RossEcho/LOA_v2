@@ -28,10 +28,15 @@ def _extract_json_object(text: str) -> dict:
 
 
 def _run_cli(argv: list[str], timeout_sec: int) -> str:
+    blocked = {"-i", "--interactive-first", "-r"}
+    if any(flag in argv for flag in blocked):
+        raise LLMError("interactive llama-cli flags are not allowed")
+
     proc = subprocess.run(
         argv,
         text=True,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         timeout=timeout_sec,
         check=False,
     )
@@ -56,11 +61,13 @@ def run_llm_json(
     schema = Path(schema_path).resolve()
     bin_path = Path(os.path.expanduser(os.getenv("LOA_LLAMA_CLI_BIN", "llama-cli")))
     timeout_sec = int(os.getenv("LOA_LLM_TIMEOUT_SEC", "90"))
+    prompt_max_chars = int(os.getenv("LOA_LLM_PROMPT_MAX_CHARS", "4000"))
 
     base_cmd = [
         str(bin_path),
         "-m",
         model_path,
+        os.getenv("LOA_LLAMA_NO_CNV_FLAG", "-no-cnv"),
         "--temp",
         str(temp),
         "--seed",
@@ -73,10 +80,27 @@ def run_llm_json(
 
     schema_flag = os.getenv("LOA_LLAMA_SCHEMA_FLAG", "--json-schema")
 
-    temp_dir = tempfile.mkdtemp(prefix="loa_prompt_")
-    prompt_file = Path(temp_dir) / "prompt.txt"
-    prompt_file.write_text(prompt, encoding="utf-8")
-    cmd = base_cmd + ["-f", str(prompt_file)]
+    prompt_flag = os.getenv("LOA_LLAMA_PROMPT_FLAG", "-p")
+    cleanup = None
+    if len(prompt) <= prompt_max_chars:
+        cmd = base_cmd + [prompt_flag, prompt]
+    else:
+        temp_dir = tempfile.mkdtemp(prefix="loa_prompt_")
+        prompt_file = Path(temp_dir) / "prompt.txt"
+        prompt_file.write_text(prompt, encoding="utf-8")
+        cmd = base_cmd + ["-f", str(prompt_file)]
+
+        def _cleanup() -> None:
+            try:
+                os.unlink(prompt_file)
+            except OSError:
+                pass
+            try:
+                os.rmdir(temp_dir)
+            except OSError:
+                pass
+
+        cleanup = _cleanup
 
     def _cleanup() -> None:
         try:
@@ -96,6 +120,7 @@ def run_llm_json(
         except Exception:
             raw = _run_cli(cmd, timeout_sec=timeout_sec)
     finally:
-        _cleanup()
+        if cleanup is not None:
+            cleanup()
 
     return _extract_json_object(raw)
