@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -26,10 +27,9 @@ def _extract_json_object(text: str) -> dict:
     raise LLMError("model output did not contain a valid JSON object")
 
 
-def _run_cli(argv: list[str], prompt: str, timeout_sec: int) -> str:
+def _run_cli(argv: list[str], timeout_sec: int) -> str:
     proc = subprocess.run(
         argv,
-        input=prompt,
         text=True,
         capture_output=True,
         timeout=timeout_sec,
@@ -69,16 +69,36 @@ def run_llm_json(
         str(n_ctx),
         "-n",
         "512",
-        "-f",
-        "-",
     ]
 
     schema_flag = os.getenv("LOA_LLAMA_SCHEMA_FLAG", "--json-schema")
-    cmd_with_schema = base_cmd + [schema_flag, str(schema)]
+    prompt_flag = os.getenv("LOA_LLAMA_PROMPT_FLAG", "--prompt")
+
+    cmd_prompt = base_cmd + [prompt_flag, prompt]
+    cmd_prompt_with_schema = cmd_prompt + [schema_flag, str(schema)]
+
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".txt") as file:
+        file.write(prompt)
+        prompt_file = file.name
+
+    cmd_file = base_cmd + ["-f", prompt_file]
+    cmd_file_with_schema = cmd_file + [schema_flag, str(schema)]
 
     try:
-        raw = _run_cli(cmd_with_schema, prompt=prompt, timeout_sec=timeout_sec)
-    except Exception:
-        raw = _run_cli(base_cmd, prompt=prompt, timeout_sec=timeout_sec)
+        try:
+            raw = _run_cli(cmd_prompt_with_schema, timeout_sec=timeout_sec)
+        except Exception:
+            try:
+                raw = _run_cli(cmd_prompt, timeout_sec=timeout_sec)
+            except Exception:
+                try:
+                    raw = _run_cli(cmd_file_with_schema, timeout_sec=timeout_sec)
+                except Exception:
+                    raw = _run_cli(cmd_file, timeout_sec=timeout_sec)
+    finally:
+        try:
+            os.unlink(prompt_file)
+        except OSError:
+            pass
 
     return _extract_json_object(raw)
