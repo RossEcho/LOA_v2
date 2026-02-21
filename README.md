@@ -27,6 +27,28 @@ Optional config path override:
 
 - `LOA_CONFIG_PATH` (default `~/.loa/config.json`)
 
+## LLM backend (recommended: llama-server)
+
+Start local server:
+
+```bash
+llama-server -m "$LOA_MODEL_PATH" --port 8080
+```
+
+LOA defaults to server backend and calls:
+
+- `POST http://127.0.0.1:8080/v1/chat/completions`
+
+Relevant env vars:
+
+- `LOA_LLM_BACKEND=server` (default; set `cli` only if needed)
+- `LOA_LLAMA_SERVER_URL` (default `http://127.0.0.1:8080/v1/chat/completions`)
+- `LOA_LLAMA_SERVER_MODEL` (default `local`)
+- `LOA_LLM_TIMEOUT_SEC` (default `90`)
+- `LOA_LLM_MAX_TOKENS` (default `512`)
+
+Deterministic generation settings are passed from orchestrator (`seed`, `temperature`, `max_tokens`).
+
 ### Configure via menu
 
 Use menu option **Configure model paths** to persist:
