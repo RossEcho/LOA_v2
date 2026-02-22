@@ -32,7 +32,7 @@ class TestOrchestratorPlannerValidation(unittest.TestCase):
         with self.assertRaises(PlanValidationError):
             validate_plan(plan, for_execution=True)
 
-    def test_outputs_rejects_runtime_claim_keys(self):
+    def test_outputs_field_is_stripped_for_backward_compat(self):
         plan = {
             "plan_id": "p3",
             "session_name": "x",
@@ -46,10 +46,10 @@ class TestOrchestratorPlannerValidation(unittest.TestCase):
             ],
             "final_output": "final.json",
         }
-        with self.assertRaises(PlanValidationError):
-            validate_plan(plan, for_execution=False)
+        validate_plan(plan, for_execution=False)
+        self.assertNotIn("outputs", plan["steps"][0])
 
-    def test_outputs_accepts_expected_artifact_paths(self):
+    def test_outputs_artifact_keys_are_ignored_and_removed(self):
         plan = {
             "plan_id": "p4",
             "session_name": "x",
@@ -69,6 +69,7 @@ class TestOrchestratorPlannerValidation(unittest.TestCase):
             "final_output": "final.json",
         }
         validate_plan(plan, for_execution=False)
+        self.assertNotIn("outputs", plan["steps"][0])
 
 
 class TestToolRegistryValidation(unittest.TestCase):

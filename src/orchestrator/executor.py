@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -79,22 +78,6 @@ def write_plan_and_meta(session_dir: Path, plan: dict, meta: dict) -> None:
     write_json(session_dir / "meta.json", meta)
 
 
-def _copy_declared_outputs(outputs: dict | None, destination: Path) -> list[str]:
-    copied: list[str] = []
-    if not outputs:
-        return copied
-    out_dir = destination / "tool_outputs"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for key, rel_path in outputs.items():
-        src = (PROJECT_ROOT / rel_path).resolve()
-        if not src.exists() or not src.is_file():
-            continue
-        dst = out_dir / f"{key}__{src.name}"
-        shutil.copy2(src, dst)
-        copied.append(str(dst))
-    return copied
-
-
 def execute_plan(plan: dict, session_dir: Path) -> dict:
     validate_plan(plan, for_execution=True)
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -152,8 +135,6 @@ def execute_plan(plan: dict, session_dir: Path) -> dict:
             },
         )
 
-        copied_outputs = _copy_declared_outputs(step.get("outputs"), step_dir)
-
         step_result = {
             "id": step["id"],
             "tool": tool.name,
@@ -162,7 +143,6 @@ def execute_plan(plan: dict, session_dir: Path) -> dict:
             "elapsed_sec": elapsed,
             "stdout_file": str(step_dir / "stdout.txt"),
             "stderr_file": str(step_dir / "stderr.txt"),
-            "copied_outputs": copied_outputs,
         }
         results.append(step_result)
 
