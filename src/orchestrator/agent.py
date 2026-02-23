@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from src.orchestrator.executor import execute_plan, write_json, write_plan_and_meta
 from src.orchestrator.llm import LLMError, extract_json_object, run_llm_text
 from src.orchestrator.planner import validate_plan
+from src.orchestrator.tools import REGISTRY
 
 
 class AgentLoopError(RuntimeError):
@@ -37,14 +39,17 @@ def _analysis_prompt(original_prompt: str, plan: dict, execution: dict, history:
 
 def _decision_prompt(original_prompt: str, analysis: dict, history: list[dict]) -> str:
     payload = {
-        "task": "Decide whether to finish or continue with another plan. Return JSON only.",
+        "task": "Choose next agent action. Return JSON only.",
         "requirements": [
             "Return ONLY one JSON object.",
             "No markdown, no code fences, no explanations outside JSON.",
-            "action must be exactly 'finish' or 'continue'.",
+            "Use this schema: {\"decision\":{\"action\":\"run_tool|respond|stop\",\"reason\":\"string\"},\"next_step\":object|null,\"response\":string|null}",
+            "If action=run_tool: next_step required, response must be null.",
+            "If action=respond: response required, next_step must be null.",
+            "If action=stop: both next_step and response must be null.",
+            "next_step fields: tool, args, optional id, optional timeout_sec or optional_timeout_sec.",
+            "args must be a JSON object; do not put natural language text in args.",
             "reason must be a plain string (not object, not null, not array).",
-            "If action is 'continue', include next_plan object.",
-            "next_plan must contain only intent fields for each step: id, tool, args, optional timeout_sec.",
         ],
         "original_prompt": original_prompt,
         "analysis": analysis,
@@ -76,10 +81,8 @@ def validate_decision(decision: dict) -> None:
     if not isinstance(decision, dict):
         raise AgentLoopError("decision must be object")
     action = decision.get("action")
-    if action not in {"finish", "continue"}:
-        raise AgentLoopError("decision.action must be 'finish' or 'continue'")
-    if action == "continue" and "next_plan" not in decision:
-        raise AgentLoopError("decision.next_plan is required when action=continue")
+    if action not in {"run_tool", "respond", "stop"}:
+        raise AgentLoopError("decision.action must be 'run_tool', 'respond', or 'stop'")
 
 
 def _normalize_decision_reason(decision: dict) -> tuple[dict, str | None]:
@@ -105,53 +108,136 @@ def _normalize_decision_reason(decision: dict) -> tuple[dict, str | None]:
     return decision, f"decision.reason coerced from {type(reason).__name__} to string"
 
 
-def _next_plan_from_step_like(step_obj: dict, iteration: int) -> dict:
-    step = dict(step_obj)
+def _normalize_step_args(args_value) -> tuple[dict, str | None]:
+    if args_value is None:
+        return {}, "args missing; defaulted to {}"
+    if isinstance(args_value, dict):
+        return dict(args_value), None
+    if isinstance(args_value, str):
+        try:
+            parsed = json.loads(args_value)
+            if isinstance(parsed, dict):
+                return parsed, "args parsed from JSON string"
+        except Exception:
+            pass
+        return {}, "args string not valid JSON object; defaulted to {}"
+    return {}, f"args type {type(args_value).__name__} coerced to {{}}"
+
+
+def _extract_ping_target(text: str) -> str | None:
+    if not isinstance(text, str):
+        return None
+    ip = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text)
+    if ip:
+        return ip.group(0)
+    host = re.search(r"\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b", text)
+    if host:
+        return host.group(0)
+    return None
+
+
+def _normalize_next_step(raw_step, original_prompt: str, iteration: int) -> tuple[dict, list[str]]:
+    if not isinstance(raw_step, dict):
+        raise AgentLoopError("next_step must be object for action=run_tool")
+
+    notes: list[str] = []
+    step = dict(raw_step)
+
     if "optional_timeout_sec" in step and "timeout_sec" not in step:
         step["timeout_sec"] = step.pop("optional_timeout_sec")
+        notes.append("mapped optional_timeout_sec to timeout_sec")
     else:
         step.pop("optional_timeout_sec", None)
 
     if "id" not in step or not isinstance(step.get("id"), str) or not step.get("id", "").strip():
         step["id"] = f"step_{iteration:03d}_1"
+        notes.append("step id generated")
 
+    args, args_note = _normalize_step_args(step.get("args"))
+    if args_note:
+        notes.append(args_note)
+    step["args"] = args
+
+    tool = step.get("tool")
+    if not isinstance(tool, str) or not tool.strip():
+        raise AgentLoopError("next_step.tool missing or invalid")
+    if tool not in REGISTRY:
+        raise AgentLoopError(f"unknown tool: {tool}")
+
+    if tool == "ping":
+        target = step["args"].get("target")
+        if not isinstance(target, str) or not target.strip():
+            recovered = _extract_ping_target(original_prompt)
+            if recovered:
+                step["args"]["target"] = recovered
+                notes.append(f"ping target repaired from prompt: {recovered}")
+            else:
+                raise AgentLoopError("ping target missing and could not be repaired")
+
+    timeout = step.get("timeout_sec")
+    if timeout is not None and not isinstance(timeout, int):
+        step.pop("timeout_sec", None)
+        notes.append("invalid timeout_sec removed")
+
+    return step, notes
+
+
+def _normalize_decision_packet(raw_packet, original_prompt: str, iteration: int) -> tuple[dict, dict]:
+    if not isinstance(raw_packet, dict):
+        raise AgentLoopError("decision packet must be object")
+
+    diagnostic: dict = {"raw_decision": raw_packet}
+
+    decision_obj = raw_packet.get("decision") if isinstance(raw_packet.get("decision"), dict) else raw_packet
+    decision_obj = dict(decision_obj) if isinstance(decision_obj, dict) else {}
+
+    if decision_obj.get("action") == "continue":
+        decision_obj["action"] = "run_tool"
+        diagnostic["action_note"] = "mapped legacy action continue->run_tool"
+    if decision_obj.get("action") == "finish":
+        decision_obj["action"] = "stop"
+        diagnostic["action_note"] = "mapped legacy action finish->stop"
+
+    decision_obj, reason_note = _normalize_decision_reason(decision_obj)
+    if reason_note:
+        diagnostic["reason_note"] = reason_note
+
+    action = decision_obj.get("action")
+    response = raw_packet.get("response")
+    raw_next_step = raw_packet.get("next_step")
+    if raw_next_step is None:
+        raw_next_step = raw_packet.get("next_plan")
+
+    normalized = {
+        "decision": decision_obj,
+        "next_step": None,
+        "response": None,
+    }
+
+    if action == "run_tool":
+        step, notes = _normalize_next_step(raw_next_step, original_prompt, iteration)
+        normalized["next_step"] = step
+        normalized["response"] = None
+        if notes:
+            diagnostic["next_step_notes"] = notes
+    elif action == "respond":
+        normalized["next_step"] = None
+        normalized["response"] = response if isinstance(response, str) else ("" if response is None else str(response))
+    elif action == "stop":
+        normalized["next_step"] = None
+        normalized["response"] = None
+
+    validate_decision(decision_obj)
+    return normalized, diagnostic
+
+
+def _next_plan_from_step(step: dict, iteration: int) -> dict:
     return {
         "plan_id": f"agent_plan_{iteration:03d}",
         "session_name": "agent_loop",
         "steps": [step],
         "final_output": "final.json",
     }
-
-
-def _normalize_next_plan(next_plan_value, iteration: int) -> tuple[dict, str | None]:
-    if not isinstance(next_plan_value, dict):
-        raise AgentLoopError("next_plan is not an object")
-
-    # Case 1: full plan object
-    if "steps" in next_plan_value or "plan_id" in next_plan_value or "final_output" in next_plan_value:
-        plan = dict(next_plan_value)
-        note_parts: list[str] = []
-        steps = plan.get("steps")
-        if isinstance(steps, list):
-            for step in steps:
-                if isinstance(step, dict) and "optional_timeout_sec" in step and "timeout_sec" not in step:
-                    step["timeout_sec"] = step.pop("optional_timeout_sec")
-                    note_parts.append("mapped optional_timeout_sec to timeout_sec in step")
-                elif isinstance(step, dict):
-                    step.pop("optional_timeout_sec", None)
-        return plan, "; ".join(note_parts) if note_parts else None
-
-    # Case 2: step-like object at top-level
-    has_tool_args = "tool" in next_plan_value and "args" in next_plan_value
-    has_id_tool_args = {"id", "tool", "args"}.issubset(next_plan_value.keys())
-    if has_tool_args or has_id_tool_args:
-        plan = _next_plan_from_step_like(next_plan_value, iteration)
-        note = "wrapped step-like next_plan into full plan"
-        if "optional_timeout_sec" in next_plan_value:
-            note += "; mapped optional_timeout_sec to timeout_sec"
-        return plan, note
-
-    raise AgentLoopError("next_plan is neither full plan nor step-like object")
 
 
 def _fallback_analysis(error: str) -> dict:
@@ -165,7 +251,7 @@ def _fallback_analysis(error: str) -> dict:
 
 def _fallback_decision(error: str) -> dict:
     return {
-        "action": "finish",
+        "action": "stop",
         "reason": f"decision_failed: {error}",
     }
 
@@ -334,14 +420,25 @@ def run_agent_loop(
                 seed=seed,
                 log_dir=iter_dir / "llm_decision",
             )
-            decision, reason_note = _normalize_decision_reason(decision_raw)
-            validate_decision(decision)
-            decision_raw_payload = {"raw_decision": decision_raw}
-            if reason_note:
-                decision_raw_payload["reason_note"] = reason_note
+            normalized_packet, decision_raw_payload = _normalize_decision_packet(
+                decision_raw,
+                original_prompt,
+                idx,
+            )
+            decision = normalized_packet["decision"]
+            next_step = normalized_packet["next_step"]
+            response = normalized_packet["response"]
+            raw_next_step_for_log = None
+            if isinstance(decision_raw, dict):
+                raw_next_step_for_log = decision_raw.get("next_step")
+                if raw_next_step_for_log is None:
+                    raw_next_step_for_log = decision_raw.get("next_plan")
         except Exception as exc:
             decision_raw = None
             decision = _fallback_decision(str(exc))
+            next_step = None
+            response = None
+            raw_next_step_for_log = None
             decision_raw_payload = {
                 "raw_decision": decision_raw,
                 "reason_note": f"decision_failed: {exc}",
@@ -349,7 +446,21 @@ def run_agent_loop(
 
         write_json(iter_dir / "analysis.json", analysis)
         write_json(iter_dir / "decision_raw.json", decision_raw_payload)
-        write_json(iter_dir / "decision.json", decision)
+        write_json(
+            iter_dir / "decision.json",
+            {
+                "decision": decision,
+                "next_step": next_step,
+                "response": response,
+            },
+        )
+        write_json(
+            iter_dir / "next_step_raw.json",
+            {
+                "raw_next_step": raw_next_step_for_log,
+                "normalized_next_step": next_step,
+            },
+        )
 
         sig = _plan_signature(plan)
         repeated_plan = sig in seen_signatures
@@ -362,6 +473,8 @@ def run_agent_loop(
             "execution": execution,
             "analysis": analysis,
             "decision": decision,
+            "next_step": next_step,
+            "response": response,
             "timestamp": _utc_now(),
         }
         session_log["iterations"].append(iteration_entry)
@@ -375,22 +488,22 @@ def run_agent_loop(
             final_summary = "stopped: repeated failures"
             break
 
-        if decision.get("action") == "finish":
+        if decision.get("action") == "stop":
             final_summary = decision.get("reason", "finished")
             break
 
-        if decision.get("action") != "continue":
+        if decision.get("action") == "respond":
+            final_summary = response or decision.get("reason", "respond")
+            break
+
+        if decision.get("action") != "run_tool":
             final_summary = "stopped: invalid decision action"
             break
 
-        raw_next_plan = decision.get("next_plan")
-        write_json(iter_dir / "next_plan_raw.json", {"next_plan": raw_next_plan})
-
         try:
-            next_plan, normalize_note = _normalize_next_plan(raw_next_plan, idx)
-            if normalize_note:
-                decision_raw_payload["next_plan_note"] = normalize_note
-                write_json(iter_dir / "decision_raw.json", decision_raw_payload)
+            if not isinstance(next_step, dict):
+                raise AgentLoopError("next_step missing for run_tool")
+            next_plan = _next_plan_from_step(next_step, idx)
             validate_plan(next_plan, for_execution=True)
         except Exception as exc:
             final_summary = f"stopped: next_plan invalid ({exc})"
