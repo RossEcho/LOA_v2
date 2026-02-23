@@ -105,6 +105,55 @@ def _normalize_decision_reason(decision: dict) -> tuple[dict, str | None]:
     return decision, f"decision.reason coerced from {type(reason).__name__} to string"
 
 
+def _next_plan_from_step_like(step_obj: dict, iteration: int) -> dict:
+    step = dict(step_obj)
+    if "optional_timeout_sec" in step and "timeout_sec" not in step:
+        step["timeout_sec"] = step.pop("optional_timeout_sec")
+    else:
+        step.pop("optional_timeout_sec", None)
+
+    if "id" not in step or not isinstance(step.get("id"), str) or not step.get("id", "").strip():
+        step["id"] = f"step_{iteration:03d}_1"
+
+    return {
+        "plan_id": f"agent_plan_{iteration:03d}",
+        "session_name": "agent_loop",
+        "steps": [step],
+        "final_output": "final.json",
+    }
+
+
+def _normalize_next_plan(next_plan_value, iteration: int) -> tuple[dict, str | None]:
+    if not isinstance(next_plan_value, dict):
+        raise AgentLoopError("next_plan is not an object")
+
+    # Case 1: full plan object
+    if "steps" in next_plan_value or "plan_id" in next_plan_value or "final_output" in next_plan_value:
+        plan = dict(next_plan_value)
+        note_parts: list[str] = []
+        steps = plan.get("steps")
+        if isinstance(steps, list):
+            for step in steps:
+                if isinstance(step, dict) and "optional_timeout_sec" in step and "timeout_sec" not in step:
+                    step["timeout_sec"] = step.pop("optional_timeout_sec")
+                    note_parts.append("mapped optional_timeout_sec to timeout_sec in step")
+                elif isinstance(step, dict):
+                    step.pop("optional_timeout_sec", None)
+        return plan, "; ".join(note_parts) if note_parts else None
+
+    # Case 2: step-like object at top-level
+    has_tool_args = "tool" in next_plan_value and "args" in next_plan_value
+    has_id_tool_args = {"id", "tool", "args"}.issubset(next_plan_value.keys())
+    if has_tool_args or has_id_tool_args:
+        plan = _next_plan_from_step_like(next_plan_value, iteration)
+        note = "wrapped step-like next_plan into full plan"
+        if "optional_timeout_sec" in next_plan_value:
+            note += "; mapped optional_timeout_sec to timeout_sec"
+        return plan, note
+
+    raise AgentLoopError("next_plan is neither full plan nor step-like object")
+
+
 def _fallback_analysis(error: str) -> dict:
     return {
         "summary": "analysis_failed",
@@ -334,12 +383,14 @@ def run_agent_loop(
             final_summary = "stopped: invalid decision action"
             break
 
-        next_plan = decision.get("next_plan")
-        if not isinstance(next_plan, dict):
-            final_summary = "stopped: missing next_plan"
-            break
+        raw_next_plan = decision.get("next_plan")
+        write_json(iter_dir / "next_plan_raw.json", {"next_plan": raw_next_plan})
 
         try:
+            next_plan, normalize_note = _normalize_next_plan(raw_next_plan, idx)
+            if normalize_note:
+                decision_raw_payload["next_plan_note"] = normalize_note
+                write_json(iter_dir / "decision_raw.json", decision_raw_payload)
             validate_plan(next_plan, for_execution=True)
         except Exception as exc:
             final_summary = f"stopped: next_plan invalid ({exc})"
