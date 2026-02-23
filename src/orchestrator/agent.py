@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +18,46 @@ class AgentLoopError(RuntimeError):
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _collect_output_snapshot(path: Path, max_inline_chars: int = 4000) -> dict:
+    snapshot = {
+        "path": str(path),
+        "exists": path.exists(),
+    }
+    if not path.exists() or not path.is_file():
+        return snapshot
+
+    content = path.read_text(encoding="utf-8", errors="replace")
+    snapshot["size_chars"] = len(content)
+    if len(content) <= max_inline_chars:
+        snapshot["inline"] = content
+        snapshot["truncated"] = False
+    else:
+        snapshot["inline"] = content[:max_inline_chars]
+        snapshot["truncated"] = True
+    return snapshot
+
+
+def _write_analysis_error_report(
+    session_dir: Path,
+    iteration: int,
+    exc: Exception,
+    tb: str,
+    llm_output_paths: list[Path],
+) -> None:
+    outputs = [_collect_output_snapshot(path) for path in llm_output_paths]
+    payload = {
+        "stage": "analysis",
+        "timestamp": _utc_now(),
+        "iteration": iteration,
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+        "traceback": tb,
+        "llm_outputs": outputs,
+    }
+    write_json(session_dir / "error.json", payload)
+    (session_dir / "error.traceback.txt").write_text(tb, encoding="utf-8")
 
 
 def _analysis_prompt(original_prompt: str, plan: dict, execution: dict, history: list[dict]) -> str:
@@ -407,6 +448,18 @@ def run_agent_loop(
                 log_dir=iter_dir / "llm_analysis",
             )
         except Exception as exc:
+            tb = traceback.format_exc()
+            _write_analysis_error_report(
+                session_dir,
+                idx,
+                exc,
+                tb,
+                [
+                    iter_dir / "llm_analysis" / "llm_raw_response.json",
+                    iter_dir / "llm_analysis" / "llm_text.txt",
+                ],
+            )
+            print(f"analysis failed: {type(exc).__name__}: {exc} (see {session_dir / 'error.json'})")
             analysis = _fallback_analysis(str(exc))
 
         try:
