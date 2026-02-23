@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.orchestrator.agent import run_agent_loop
 from src.orchestrator.executor import build_meta, create_session_dir, execute_plan, write_plan_and_meta
 from src.orchestrator.planner import generate_plan, sanitize_session_name, validate_plan
 
@@ -157,6 +158,41 @@ def _run_session(session_dir_arg: str, yes: bool) -> int:
     return 0
 
 
+def _agent_from_prompt(prompt: str, max_steps: int) -> int:
+    model_path = _resolve_model_path()
+    n_ctx = int(os.getenv("LOA_N_CTX", "2048"))
+    seed = int(os.getenv("LOA_SEED", "0"))
+    temp = 0.0
+
+    session_seed = sanitize_session_name((prompt or "session")[:80])
+    session_dir = create_session_dir(session_seed)
+
+    initial_plan = generate_plan(
+        prompt,
+        model_path=model_path,
+        n_ctx=n_ctx,
+        temp=temp,
+        seed=seed,
+        llm_log_dir=session_dir / "llm_plan_initial",
+    )
+    validate_plan(initial_plan, for_execution=False)
+
+    meta = build_meta(model_path=model_path, n_ctx=n_ctx, temp=temp, seed=seed)
+    summary = run_agent_loop(
+        session_dir=session_dir,
+        original_prompt=prompt,
+        initial_plan=initial_plan,
+        meta=meta,
+        model_path=model_path,
+        n_ctx=n_ctx,
+        temp=temp,
+        seed=seed,
+        max_steps=max_steps,
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _interactive_menu() -> int:
     while True:
         print("\nLOA Menu")
@@ -222,6 +258,10 @@ def main() -> int:
     ask_cmd.add_argument("prompt", help="User prompt")
     ask_cmd.add_argument("--yes", action="store_true", help="Skip approval prompt and execute")
 
+    agent_cmd = sub.add_parser("agent", help="Run planner-executor-analyzer-decision loop")
+    agent_cmd.add_argument("prompt", help="User prompt")
+    agent_cmd.add_argument("--max-steps", type=int, default=5, help="Maximum loop iterations")
+
     args = parser.parse_args()
 
     if args.command in (None, "menu"):
@@ -233,6 +273,8 @@ def main() -> int:
         return _run_session(args.session_dir, yes=args.yes)
     if args.command == "ask":
         return _session_from_prompt(args.prompt, yes=args.yes)
+    if args.command == "agent":
+        return _agent_from_prompt(args.prompt, max_steps=max(1, int(args.max_steps)))
     return 1
 
 
