@@ -200,8 +200,9 @@ def _interactive_menu() -> int:
         print("2) Run existing session")
         print("3) Ask (plan + optional run)")
         print("4) Configure model paths")
-        print("5) Exit")
-        choice = input("Select [1-5]: ").strip()
+        print("5) Agent loop")
+        print("6) Exit")
+        choice = input("Select [1-6]: ").strip()
 
         if choice == "1":
             prompt = input("Prompt: ").strip()
@@ -234,6 +235,23 @@ def _interactive_menu() -> int:
             continue
 
         if choice == "5":
+            prompt = input("Prompt: ").strip()
+            if not prompt:
+                print("Prompt cannot be empty")
+                continue
+            max_steps_raw = input("Max steps [default 5]: ").strip()
+            if not max_steps_raw:
+                max_steps = 5
+            else:
+                try:
+                    max_steps = max(1, int(max_steps_raw))
+                except ValueError:
+                    print("Max steps must be an integer")
+                    continue
+            _agent_from_prompt(prompt, max_steps=max_steps)
+            continue
+
+        if choice == "6":
             return 0
 
         print("Invalid selection")
