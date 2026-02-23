@@ -1,6 +1,11 @@
 import unittest
 
-from src.orchestrator.agent import AgentLoopError, validate_analysis, validate_decision
+from src.orchestrator.agent import (
+    AgentLoopError,
+    _normalize_decision_reason,
+    validate_analysis,
+    validate_decision,
+)
 
 
 class TestAgentValidators(unittest.TestCase):
@@ -31,6 +36,12 @@ class TestAgentValidators(unittest.TestCase):
 
     def test_validate_decision_finish_ok(self):
         validate_decision({"action": "finish", "reason": "done"})
+
+    def test_decision_reason_is_coerced_not_rejected(self):
+        decision, note = _normalize_decision_reason({"action": "finish", "reason": {"x": 1}})
+        self.assertIsNotNone(note)
+        self.assertIsInstance(decision["reason"], str)
+        validate_decision(decision)
 
 
 if __name__ == "__main__":

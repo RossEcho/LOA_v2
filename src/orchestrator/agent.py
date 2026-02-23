@@ -42,7 +42,7 @@ def _decision_prompt(original_prompt: str, analysis: dict, history: list[dict]) 
             "Return ONLY one JSON object.",
             "No markdown, no code fences, no explanations outside JSON.",
             "action must be exactly 'finish' or 'continue'.",
-            "Include reason string.",
+            "reason must be a plain string (not object, not null, not array).",
             "If action is 'continue', include next_plan object.",
             "next_plan must contain only intent fields for each step: id, tool, args, optional timeout_sec.",
         ],
@@ -76,13 +76,33 @@ def validate_decision(decision: dict) -> None:
     if not isinstance(decision, dict):
         raise AgentLoopError("decision must be object")
     action = decision.get("action")
-    reason = decision.get("reason")
     if action not in {"finish", "continue"}:
         raise AgentLoopError("decision.action must be 'finish' or 'continue'")
-    if not isinstance(reason, str):
-        raise AgentLoopError("decision.reason must be string")
     if action == "continue" and "next_plan" not in decision:
         raise AgentLoopError("decision.next_plan is required when action=continue")
+
+
+def _normalize_decision_reason(decision: dict) -> tuple[dict, str | None]:
+    if not isinstance(decision, dict):
+        return decision, "decision is not an object"
+
+    if "reason" not in decision:
+        decision["reason"] = ""
+        return decision, "decision.reason missing; defaulted to empty string"
+
+    reason = decision.get("reason")
+    if isinstance(reason, str):
+        return decision, None
+
+    if isinstance(reason, (dict, list)):
+        try:
+            decision["reason"] = json.dumps(reason, ensure_ascii=False)
+        except Exception:
+            decision["reason"] = str(reason)
+    else:
+        decision["reason"] = "" if reason is None else str(reason)
+
+    return decision, f"decision.reason coerced from {type(reason).__name__} to string"
 
 
 def _fallback_analysis(error: str) -> dict:
@@ -150,7 +170,6 @@ def _generate_decision(
         log_dir=log_dir,
     )
     decision = extract_json_object(text)
-    validate_decision(decision)
     return decision
 
 
@@ -256,7 +275,7 @@ def run_agent_loop(
             analysis = _fallback_analysis(str(exc))
 
         try:
-            decision = _generate_decision(
+            decision_raw = _generate_decision(
                 original_prompt,
                 analysis,
                 history,
@@ -266,10 +285,21 @@ def run_agent_loop(
                 seed=seed,
                 log_dir=iter_dir / "llm_decision",
             )
+            decision, reason_note = _normalize_decision_reason(decision_raw)
+            validate_decision(decision)
+            decision_raw_payload = {"raw_decision": decision_raw}
+            if reason_note:
+                decision_raw_payload["reason_note"] = reason_note
         except Exception as exc:
+            decision_raw = None
             decision = _fallback_decision(str(exc))
+            decision_raw_payload = {
+                "raw_decision": decision_raw,
+                "reason_note": f"decision_failed: {exc}",
+            }
 
         write_json(iter_dir / "analysis.json", analysis)
+        write_json(iter_dir / "decision_raw.json", decision_raw_payload)
         write_json(iter_dir / "decision.json", decision)
 
         sig = _plan_signature(plan)
