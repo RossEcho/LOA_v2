@@ -107,8 +107,7 @@ def validate_analysis(analysis: dict) -> None:
             raise AgentLoopError(f"analysis missing field: {key}")
     if not isinstance(analysis["summary"], str):
         raise AgentLoopError("analysis.summary must be string")
-    if not isinstance(analysis["observations"], list) or any(not isinstance(x, str) for x in analysis["observations"]):
-        raise AgentLoopError("analysis.observations must be string[]")
+    # observations formatting is non-critical and handled via normalization.
     if not isinstance(analysis["errors"], list) or any(not isinstance(x, str) for x in analysis["errors"]):
         raise AgentLoopError("analysis.errors must be string[]")
     confidence = analysis["confidence"]
@@ -116,6 +115,31 @@ def validate_analysis(analysis: dict) -> None:
         raise AgentLoopError("analysis.confidence must be number")
     if confidence < 0 or confidence > 1:
         raise AgentLoopError("analysis.confidence must be in range 0..1")
+
+
+def _normalize_analysis_payload(analysis: dict) -> tuple[dict, str | None]:
+    if not isinstance(analysis, dict):
+        raise AgentLoopError("analysis must be object")
+
+    normalized = dict(analysis)
+    note = None
+
+    observations = normalized.get("observations")
+    if observations is None:
+        normalized["observations"] = []
+        note = "observations missing/null; defaulted to []"
+    elif isinstance(observations, str):
+        normalized["observations"] = [observations]
+        note = "observations string wrapped into list"
+    elif isinstance(observations, list):
+        normalized["observations"] = [str(item) for item in observations]
+        if any(not isinstance(item, str) for item in observations):
+            note = "observations list items coerced to string"
+    else:
+        normalized["observations"] = [str(observations)]
+        note = f"observations coerced from {type(observations).__name__}"
+
+    return normalized, note
 
 
 def validate_decision(decision: dict) -> None:
@@ -308,7 +332,7 @@ def _generate_analysis(
     temp: float,
     seed: int,
     log_dir: Path,
-) -> dict:
+) -> tuple[dict, dict, str | None]:
     prompt = _analysis_prompt(original_prompt, plan, execution, history)
     text = run_llm_text(
         prompt,
@@ -319,9 +343,10 @@ def _generate_analysis(
         seed=seed,
         log_dir=log_dir,
     )
-    analysis = extract_json_object(text)
+    raw_analysis = extract_json_object(text)
+    analysis, note = _normalize_analysis_payload(raw_analysis)
     validate_analysis(analysis)
-    return analysis
+    return raw_analysis, analysis, note
 
 
 def _generate_decision(
@@ -436,7 +461,7 @@ def run_agent_loop(
         ]
 
         try:
-            analysis = _generate_analysis(
+            raw_analysis, analysis, analysis_note = _generate_analysis(
                 original_prompt,
                 plan,
                 execution,
@@ -448,6 +473,8 @@ def run_agent_loop(
                 log_dir=iter_dir / "llm_analysis",
             )
         except Exception as exc:
+            raw_analysis = None
+            analysis_note = f"analysis_failed: {exc}"
             tb = traceback.format_exc()
             _write_analysis_error_report(
                 session_dir,
@@ -497,6 +524,14 @@ def run_agent_loop(
                 "reason_note": f"decision_failed: {exc}",
             }
 
+        write_json(
+            iter_dir / "analysis_raw.json",
+            {
+                "raw_analysis": raw_analysis,
+                "note": analysis_note,
+            },
+        )
+        write_json(iter_dir / "analysis_norm.json", analysis)
         write_json(iter_dir / "analysis.json", analysis)
         write_json(iter_dir / "decision_raw.json", decision_raw_payload)
         write_json(

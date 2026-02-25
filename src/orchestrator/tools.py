@@ -10,7 +10,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 @dataclass(frozen=True)
 class ToolDef:
     name: str
+    version: str
     description: str
+    action_class: str
     args_schema: dict
     enabled_for_planning: bool
     enabled_for_execution: bool
@@ -64,7 +66,9 @@ def _smartar_cmd(args: dict) -> list[str]:
 REGISTRY: dict[str, ToolDef] = {
     "ping": ToolDef(
         name="ping",
+        version="1.0.0",
         description="Check reachability/latency to a host.",
+        action_class="NETWORK",
         args_schema={
             "type": "object",
             "required": ["target"],
@@ -80,7 +84,9 @@ REGISTRY: dict[str, ToolDef] = {
     ),
     "SmarTar": ToolDef(
         name="SmarTar",
+        version="1.0.0",
         description="Search archive index and extract best match.",
+        action_class="READ",
         args_schema={
             "type": "object",
             "required": ["db", "archive", "query"],
@@ -112,7 +118,25 @@ def list_planning_tools() -> list[dict]:
             tools.append(
                 {
                     "name": tool.name,
+                    "version": tool.version,
                     "description": tool.description,
+                    "action_class": tool.action_class,
+                    "args_schema": tool.args_schema,
+                }
+            )
+    return tools
+
+
+def list_execution_tools() -> list[dict]:
+    tools: list[dict] = []
+    for tool in REGISTRY.values():
+        if tool.enabled_for_execution:
+            tools.append(
+                {
+                    "name": tool.name,
+                    "version": tool.version,
+                    "description": tool.description,
+                    "action_class": tool.action_class,
                     "args_schema": tool.args_schema,
                 }
             )

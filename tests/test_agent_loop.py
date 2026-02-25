@@ -2,6 +2,7 @@ import unittest
 
 from src.orchestrator.agent import (
     AgentLoopError,
+    _normalize_analysis_payload,
     _normalize_decision_packet,
     _normalize_next_step,
     _normalize_decision_reason,
@@ -77,6 +78,42 @@ class TestAgentValidators(unittest.TestCase):
         self.assertEqual(packet["decision"]["action"], "run_tool")
         self.assertIsNotNone(packet["next_step"])
         self.assertIn("action_note", diag)
+
+    def test_normalize_analysis_observations_string(self):
+        raw, note = _normalize_analysis_payload(
+            {
+                "summary": "ok",
+                "observations": "single",
+                "errors": [],
+                "confidence": 0.5,
+            }
+        )
+        self.assertEqual(raw["observations"], ["single"])
+        self.assertIsNotNone(note)
+
+    def test_normalize_analysis_observations_none(self):
+        raw, note = _normalize_analysis_payload(
+            {
+                "summary": "ok",
+                "observations": None,
+                "errors": [],
+                "confidence": 0.5,
+            }
+        )
+        self.assertEqual(raw["observations"], [])
+        self.assertIsNotNone(note)
+
+    def test_normalize_analysis_observations_object_list(self):
+        raw, note = _normalize_analysis_payload(
+            {
+                "summary": "ok",
+                "observations": [{"a": 1}, 2],
+                "errors": [],
+                "confidence": 0.5,
+            }
+        )
+        self.assertEqual(raw["observations"], ["{'a': 1}", "2"])
+        self.assertIsNotNone(note)
 
 
 if __name__ == "__main__":

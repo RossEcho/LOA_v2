@@ -1,0 +1,5 @@
+.memory/
+.secrets/
+.logs/
+__pycache__/
+*.pyc

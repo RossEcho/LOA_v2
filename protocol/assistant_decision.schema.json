@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Assistant Decision",
+  "type": "object",
+  "required": [
+    "action"
+  ],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "respond",
+        "tool"
+      ]
+    },
+    "response": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tool_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "args": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "action_class": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "READ",
+        "WRITE",
+        "NETWORK",
+        "SYSTEM",
+        null
+      ]
+    },
+    "timeout_seconds": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false
+}
