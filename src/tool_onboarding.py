@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -59,11 +60,17 @@ def _run_checked(cmd: list[str], *, timeout_sec: int = 20) -> subprocess.Complet
 
 
 def capture_help(tool: str) -> tuple[str, str, list[str], str]:
+    tool_path = ""
     quoted = shlex.quote(tool)
-    lookup = _run_checked(["sh", "-lc", f"command -v {quoted}"])
-    if lookup.returncode != 0 or not lookup.stdout.strip():
-        raise ToolOnboardingError(f"tool not found: {tool}")
-    tool_path = lookup.stdout.strip().splitlines()[0].strip()
+    if shutil.which("sh"):
+        lookup = _run_checked(["sh", "-lc", f"command -v {quoted}"])
+        if lookup.returncode == 0 and lookup.stdout.strip():
+            tool_path = lookup.stdout.strip().splitlines()[0].strip()
+    if not tool_path:
+        found = shutil.which(tool)
+        if not found:
+            raise ToolOnboardingError(f"tool not found: {tool}")
+        tool_path = found
 
     help_cmd = [tool, "-h"]
     help_proc = _run_checked(help_cmd, timeout_sec=30)
