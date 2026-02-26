@@ -1,0 +1,71 @@
+{
+  "type": "object",
+  "required": [
+    "flags",
+    "arg_syntax",
+    "arg_type",
+    "default",
+    "summary",
+    "details",
+    "conflicts_with",
+    "implies",
+    "category",
+    "risk_tags",
+    "source_hash"
+  ],
+  "properties": {
+    "flags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "arg_syntax": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "arg_type": {
+      "type": "string"
+    },
+    "default": {
+      "type": [
+        "string",
+        "number",
+        "boolean",
+        "null"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "details": {
+      "type": "string"
+    },
+    "conflicts_with": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "implies": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "category": {
+      "type": "string"
+    },
+    "risk_tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "source_hash": {
+      "type": "string"
+    }
+  }
+}

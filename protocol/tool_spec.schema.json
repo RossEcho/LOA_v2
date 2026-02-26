@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "required": [
+    "name",
+    "version",
+    "help_cmd",
+    "help_hash",
+    "options"
+  ],
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "help_cmd": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "help_hash": {
+      "type": "string"
+    },
+    "options": {
+      "type": "object"
+    }
+  }
+}
