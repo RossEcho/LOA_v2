@@ -158,7 +158,16 @@ def _run_session(session_dir_arg: str, yes: bool) -> int:
     return 0
 
 
-def _agent_from_prompt(prompt: str, max_steps: int) -> int:
+def _agent_from_prompt(
+    prompt: str,
+    *,
+    max_steps: int,
+    multi_step: bool,
+    max_retries: int,
+    max_expansions: int,
+    max_replans: int,
+    max_runtime_sec: int | None,
+) -> int:
     model_path = _resolve_model_path()
     n_ctx = int(os.getenv("LOA_N_CTX", "2048"))
     seed = int(os.getenv("LOA_SEED", "0"))
@@ -188,6 +197,11 @@ def _agent_from_prompt(prompt: str, max_steps: int) -> int:
         temp=temp,
         seed=seed,
         max_steps=max_steps,
+        multi_step_mode=multi_step,
+        max_retries=max_retries,
+        max_expansions=max_expansions,
+        max_replans=max_replans,
+        max_runtime_sec=max_runtime_sec,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
@@ -248,7 +262,17 @@ def _interactive_menu() -> int:
                 except ValueError:
                     print("Max steps must be an integer")
                     continue
-            _agent_from_prompt(prompt, max_steps=max_steps)
+            multi_step_raw = input("Enable multi-step mode? [y/N]: ").strip().lower()
+            multi_step = multi_step_raw in {"y", "yes"}
+            _agent_from_prompt(
+                prompt,
+                max_steps=max_steps,
+                multi_step=multi_step,
+                max_retries=1,
+                max_expansions=2,
+                max_replans=1,
+                max_runtime_sec=None,
+            )
             continue
 
         if choice == "6":
@@ -279,6 +303,11 @@ def main() -> int:
     agent_cmd = sub.add_parser("agent", help="Run planner-executor-analyzer-decision loop")
     agent_cmd.add_argument("prompt", help="User prompt")
     agent_cmd.add_argument("--max-steps", type=int, default=5, help="Maximum loop iterations")
+    agent_cmd.add_argument("--multi-step", action="store_true", help="Enable sequential multi-step execution mode")
+    agent_cmd.add_argument("--max-retries", type=int, default=1, help="Maximum retries per step in multi-step mode")
+    agent_cmd.add_argument("--max-expansions", type=int, default=2, help="Maximum continuation appends in multi-step mode")
+    agent_cmd.add_argument("--max-replans", type=int, default=1, help="Maximum full replans in multi-step mode")
+    agent_cmd.add_argument("--max-runtime-sec", type=int, default=None, help="Optional runtime limit for multi-step mode")
 
     args = parser.parse_args()
 
@@ -292,7 +321,15 @@ def main() -> int:
     if args.command == "ask":
         return _session_from_prompt(args.prompt, yes=args.yes)
     if args.command == "agent":
-        return _agent_from_prompt(args.prompt, max_steps=max(1, int(args.max_steps)))
+        return _agent_from_prompt(
+            args.prompt,
+            max_steps=max(1, int(args.max_steps)),
+            multi_step=bool(args.multi_step),
+            max_retries=max(0, int(args.max_retries)),
+            max_expansions=max(0, int(args.max_expansions)),
+            max_replans=max(0, int(args.max_replans)),
+            max_runtime_sec=(None if args.max_runtime_sec is None else max(1, int(args.max_runtime_sec))),
+        )
     return 1
 
 

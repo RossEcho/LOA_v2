@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.orchestrator.executor import execute_plan, write_json, write_plan_and_meta
-from src.orchestrator.llm import LLMError, extract_json_object, run_llm_text
-from src.orchestrator.planner import validate_plan
+from src.orchestrator.llm import extract_json_object, run_llm_text
+from src.orchestrator.planner import generate_plan, validate_plan
 from src.orchestrator.tools import REGISTRY
 
 
@@ -107,7 +107,6 @@ def validate_analysis(analysis: dict) -> None:
             raise AgentLoopError(f"analysis missing field: {key}")
     if not isinstance(analysis["summary"], str):
         raise AgentLoopError("analysis.summary must be string")
-    # observations formatting is non-critical and handled via normalization.
     if not isinstance(analysis["errors"], list) or any(not isinstance(x, str) for x in analysis["errors"]):
         raise AgentLoopError("analysis.errors must be string[]")
     confidence = analysis["confidence"]
@@ -403,7 +402,249 @@ def _plan_signature(plan: dict) -> str:
     return json.dumps(slim, ensure_ascii=False, sort_keys=True)
 
 
-def run_agent_loop(
+def _trim_text(value: str, max_chars: int = 1200) -> str:
+    if not isinstance(value, str):
+        return ""
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars]
+
+
+def _collect_step_io(step_result: dict, max_chars: int = 1200) -> dict:
+    stdout_path = Path(step_result.get("stdout_file", ""))
+    stderr_path = Path(step_result.get("stderr_file", ""))
+    stdout = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
+    stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
+    return {
+        "stdout": _trim_text(stdout, max_chars=max_chars),
+        "stderr": _trim_text(stderr, max_chars=max_chars),
+        "stdout_truncated": len(stdout) > max_chars,
+        "stderr_truncated": len(stderr) > max_chars,
+    }
+
+
+def _validate_step_result(step: dict, step_result: dict) -> tuple[bool, list[str], dict]:
+    criteria = step.get("success_criteria", {"type": "exit_code", "equals": 0})
+    io = _collect_step_io(step_result)
+    failures: list[str] = []
+
+    expected_code = int(criteria.get("equals", 0))
+    actual_code = int(step_result.get("exit_code", -1))
+    if actual_code != expected_code:
+        failures.append(f"exit_code {actual_code} != {expected_code}")
+
+    for snippet in criteria.get("stdout_contains", []):
+        if snippet not in io["stdout"]:
+            failures.append(f"stdout missing snippet: {snippet}")
+
+    for snippet in criteria.get("stderr_contains", []):
+        if snippet not in io["stderr"]:
+            failures.append(f"stderr missing snippet: {snippet}")
+
+    return len(failures) == 0, failures, io
+
+
+def _step_plan(plan: dict, step: dict, run_index: int, attempt: int) -> dict:
+    step_copy = dict(step)
+    step_copy.pop("depends_on", None)
+    step_copy.pop("success_criteria", None)
+    step_copy.pop("retry_policy", None)
+    step_copy.pop("description", None)
+    return {
+        "plan_id": f"{plan.get('plan_id', 'plan')}_run_{run_index:03d}_{step['id']}_try{attempt}",
+        "session_name": plan.get("session_name", "session"),
+        "steps": [step_copy],
+        "final_output": "final.json",
+    }
+
+
+def _sorted_plan_steps(plan: dict) -> list[dict]:
+    return [step for step in plan.get("steps", []) if isinstance(step, dict)]
+
+
+def _find_next_executable_step(plan: dict, completed: set[str], failed: set[str], queued: set[str]) -> dict | None:
+    for step in _sorted_plan_steps(plan):
+        step_id = step["id"]
+        if step_id in completed or step_id in failed:
+            continue
+        deps = step.get("depends_on", [])
+        if any(dep in failed for dep in deps):
+            continue
+        if all(dep in completed for dep in deps):
+            if step_id not in queued:
+                return step
+    return None
+
+
+def _coerce_planned_step(raw_step: dict, fallback_prefix: str, index: int) -> dict:
+    step = dict(raw_step) if isinstance(raw_step, dict) else {}
+    if not isinstance(step.get("id"), str) or not step["id"].strip():
+        step["id"] = f"{fallback_prefix}_{index:03d}"
+    if not isinstance(step.get("description"), str) or not step["description"].strip():
+        tool_name = step.get("tool", "tool")
+        step["description"] = f"Execute tool '{tool_name}'"
+    if not isinstance(step.get("args"), dict):
+        step["args"] = {}
+    if not isinstance(step.get("depends_on"), list):
+        step["depends_on"] = []
+    if not isinstance(step.get("success_criteria"), dict):
+        step["success_criteria"] = {"type": "exit_code", "equals": 0}
+    if not isinstance(step.get("retry_policy"), dict):
+        step["retry_policy"] = {"max_retries": 0}
+    return step
+
+
+def _ensure_unique_step_ids(existing_ids: set[str], step: dict, prefix: str) -> None:
+    original = step["id"]
+    if original not in existing_ids:
+        existing_ids.add(original)
+        return
+    suffix = 1
+    while True:
+        candidate = f"{prefix}_{suffix}"
+        suffix += 1
+        if candidate not in existing_ids:
+            step["id"] = candidate
+            existing_ids.add(candidate)
+            return
+
+def _continuation_prompt(goal: str, plan: dict, state_summary: dict) -> str:
+    payload = {
+        "task": "Generate continuation steps only when strictly needed.",
+        "requirements": [
+            "Return JSON only.",
+            "Return object with keys: append_steps (array), reason (string).",
+            "append_steps must contain only NEW steps; never include already executed steps.",
+            "If no continuation needed, return append_steps as empty array.",
+            "Each appended step must include: id, description, tool, args.",
+            "Optionally include: depends_on, success_criteria, retry_policy, timeout_sec.",
+            "Keep appended steps minimal and aligned with original goal.",
+        ],
+        "goal": goal,
+        "current_plan": plan,
+        "state_summary": state_summary,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _parse_continuation_packet(raw: dict) -> tuple[list[dict], str]:
+    if not isinstance(raw, dict):
+        raise AgentLoopError("continuation payload must be object")
+    append_steps = raw.get("append_steps", [])
+    if not isinstance(append_steps, list):
+        raise AgentLoopError("append_steps must be array")
+    reason = raw.get("reason")
+    if not isinstance(reason, str):
+        reason = ""
+    return append_steps, reason
+
+
+def _state_summary_for_planning(state: dict, max_outputs: int = 8) -> dict:
+    output_items = list(state.get("tool_outputs", {}).items())
+    trimmed_outputs = []
+    for step_id, payload in output_items[-max_outputs:]:
+        if not isinstance(payload, dict):
+            continue
+        trimmed_outputs.append(
+            {
+                "step_id": step_id,
+                "exit_code": payload.get("exit_code"),
+                "timed_out": payload.get("timed_out"),
+                "stdout_excerpt": payload.get("stdout_excerpt"),
+                "stderr_excerpt": payload.get("stderr_excerpt"),
+            }
+        )
+    return {
+        "completed_steps": state.get("completed_steps", []),
+        "failed_steps": state.get("failed_steps", []),
+        "pending_steps": state.get("pending_steps", []),
+        "tool_outputs": trimmed_outputs,
+    }
+
+
+def _generate_continuation_steps(
+    *,
+    goal: str,
+    plan: dict,
+    state: dict,
+    model_path: str,
+    n_ctx: int,
+    temp: float,
+    seed: int,
+    log_dir: Path,
+    id_prefix: str,
+) -> tuple[list[dict], str]:
+    prompt = _continuation_prompt(goal, plan, _state_summary_for_planning(state))
+    text = run_llm_text(
+        prompt,
+        Path(__file__).with_name("continuation.schema.json"),
+        model_path=model_path,
+        n_ctx=n_ctx,
+        temp=temp,
+        seed=seed,
+        log_dir=log_dir,
+    )
+    packet = extract_json_object(text)
+    raw_steps, reason = _parse_continuation_packet(packet)
+
+    existing_ids = {step["id"] for step in _sorted_plan_steps(plan)}
+    normalized_steps: list[dict] = []
+    for idx, raw_step in enumerate(raw_steps, start=1):
+        step = _coerce_planned_step(raw_step, fallback_prefix=f"{id_prefix}_{idx}", index=idx)
+        _ensure_unique_step_ids(existing_ids, step, prefix=f"{id_prefix}_{idx}")
+        normalized_steps.append(step)
+
+    if normalized_steps:
+        trial_plan = {
+            "plan_id": plan.get("plan_id", "plan"),
+            "session_name": plan.get("session_name", "session"),
+            "steps": _sorted_plan_steps(plan) + normalized_steps,
+            "final_output": plan.get("final_output", "final.json"),
+        }
+        validate_plan(trial_plan, for_execution=True)
+    return normalized_steps, reason
+
+
+def _full_replan_prompt(goal: str, state_summary: dict, failure_reason: str) -> str:
+    payload = {
+        "task": "Create a full replacement plan to complete the original goal.",
+        "requirements": [
+            "Return JSON object for a full plan.",
+            "Plan must remain aligned with original goal.",
+            "Use minimal steps and deterministic tool arguments.",
+        ],
+        "goal": goal,
+        "failure_reason": failure_reason,
+        "state_summary": state_summary,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _generate_full_replan(
+    *,
+    goal: str,
+    state: dict,
+    failure_reason: str,
+    model_path: str,
+    n_ctx: int,
+    temp: float,
+    seed: int,
+    log_dir: Path,
+) -> dict:
+    replan_prompt = _full_replan_prompt(goal, _state_summary_for_planning(state), failure_reason)
+    plan = generate_plan(
+        replan_prompt,
+        model_path=model_path,
+        n_ctx=n_ctx,
+        temp=temp,
+        seed=seed,
+        llm_log_dir=log_dir,
+    )
+    validate_plan(plan, for_execution=False)
+    return plan
+
+
+def _run_agent_loop_legacy(
     *,
     session_dir: Path,
     original_prompt: str,
@@ -413,13 +654,14 @@ def run_agent_loop(
     n_ctx: int,
     temp: float,
     seed: int,
-    max_steps: int = 5,
+    max_steps: int,
 ) -> dict:
     session_dir.mkdir(parents=True, exist_ok=True)
     iterations_dir = session_dir / "iterations"
     iterations_dir.mkdir(parents=True, exist_ok=True)
 
     session_log: dict = {
+        "mode": "one_shot",
         "original_prompt": original_prompt,
         "started_at": _utc_now(),
         "max_steps": max_steps,
@@ -609,4 +851,347 @@ def run_agent_loop(
         "summary": final_summary,
         "iterations": len(session_log["iterations"]),
         "session_dir": str(session_dir),
+        "mode": "one_shot",
     }
+
+def _run_agent_loop_multi_step(
+    *,
+    session_dir: Path,
+    original_prompt: str,
+    initial_plan: dict,
+    meta: dict,
+    model_path: str,
+    n_ctx: int,
+    temp: float,
+    seed: int,
+    max_steps: int,
+    max_retries: int,
+    max_expansions: int,
+    max_replans: int,
+    max_runtime_sec: int | None,
+) -> dict:
+    session_dir.mkdir(parents=True, exist_ok=True)
+    validate_plan(initial_plan, for_execution=False)
+
+    started_at = datetime.now(timezone.utc)
+    history_dir = session_dir / "multi_step"
+    history_dir.mkdir(parents=True, exist_ok=True)
+
+    state: dict = {
+        "mode": "multi_step",
+        "planning_mode": "initial",
+        "goal": original_prompt,
+        "current_plan": initial_plan,
+        "completed_steps": [],
+        "pending_steps": [step["id"] for step in _sorted_plan_steps(initial_plan)],
+        "failed_steps": [],
+        "tool_outputs": {},
+        "artifacts": {},
+        "step_attempts": {},
+        "continuation_expansions": 0,
+        "replanning_attempts": 0,
+        "run_count": 0,
+        "limits": {
+            "max_steps": max_steps,
+            "max_retries": max_retries,
+            "max_expansions": max_expansions,
+            "max_replans": max_replans,
+            "max_runtime_sec": max_runtime_sec,
+        },
+        "log": {
+            "original_plan_steps": _sorted_plan_steps(initial_plan),
+            "appended_steps": [],
+            "replans": [],
+            "step_runs": [],
+        },
+        "summary": "",
+        "started_at": _utc_now(),
+    }
+    write_json(session_dir / "session_state.json", state)
+
+    while True:
+        elapsed_sec = int((datetime.now(timezone.utc) - started_at).total_seconds())
+        if max_runtime_sec is not None and elapsed_sec >= max_runtime_sec:
+            state["summary"] = "stopped: runtime limit reached"
+            break
+        if state["run_count"] >= max_steps:
+            state["summary"] = "stopped: max_steps reached"
+            break
+
+        completed_set = set(state["completed_steps"])
+        failed_set = {item["step_id"] for item in state["failed_steps"] if isinstance(item, dict)}
+        skipped_due_to_failed_dependency: set[str] = set()
+        for step in _sorted_plan_steps(state["current_plan"]):
+            step_id = step["id"]
+            if step_id in completed_set or step_id in failed_set:
+                continue
+            deps = step.get("depends_on", [])
+            if any(dep in failed_set for dep in deps):
+                skipped_due_to_failed_dependency.add(step_id)
+
+        pending = [
+            step["id"]
+            for step in _sorted_plan_steps(state["current_plan"])
+            if step["id"] not in completed_set and step["id"] not in failed_set and step["id"] not in skipped_due_to_failed_dependency
+        ]
+        state["pending_steps"] = pending
+
+        step = _find_next_executable_step(
+            state["current_plan"],
+            completed=completed_set,
+            failed=failed_set,
+            queued=set(),
+        )
+
+        if step is None:
+            if pending:
+                if state["replanning_attempts"] >= max_replans:
+                    state["summary"] = "stopped: invalid dependency graph and replan limit reached"
+                    break
+                state["planning_mode"] = "full_replan"
+                replanned = _generate_full_replan(
+                    goal=original_prompt,
+                    state=state,
+                    failure_reason="No executable step due to dependencies",
+                    model_path=model_path,
+                    n_ctx=n_ctx,
+                    temp=temp,
+                    seed=seed,
+                    log_dir=history_dir / f"replan_{state['replanning_attempts'] + 1:03d}",
+                )
+                state["current_plan"] = replanned
+                state["replanning_attempts"] += 1
+                state["log"]["replans"].append(
+                    {
+                        "index": state["replanning_attempts"],
+                        "reason": "No executable step due to dependencies",
+                        "plan": replanned,
+                    }
+                )
+                write_json(session_dir / "session_state.json", state)
+                continue
+
+            if state["continuation_expansions"] < max_expansions:
+                state["planning_mode"] = "continuation_append"
+                new_steps, reason = _generate_continuation_steps(
+                    goal=original_prompt,
+                    plan=state["current_plan"],
+                    state=state,
+                    model_path=model_path,
+                    n_ctx=n_ctx,
+                    temp=temp,
+                    seed=seed,
+                    log_dir=history_dir / f"continuation_{state['continuation_expansions'] + 1:03d}",
+                    id_prefix=f"cont_{state['continuation_expansions'] + 1:03d}",
+                )
+                state["continuation_expansions"] += 1
+                if new_steps:
+                    state["current_plan"]["steps"].extend(new_steps)
+                    state["log"]["appended_steps"].append(
+                        {"reason": reason, "steps": new_steps, "at_run": state["run_count"]}
+                    )
+                    validate_plan(state["current_plan"], for_execution=False)
+                    write_json(session_dir / "session_state.json", state)
+                    continue
+            state["summary"] = "success"
+            break
+
+        step_id = step["id"]
+        attempt = int(state["step_attempts"].get(step_id, 0)) + 1
+        state["step_attempts"][step_id] = attempt
+        state["run_count"] += 1
+
+        run_dir = history_dir / f"run_{state['run_count']:03d}_{step_id}_try{attempt}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        step_plan = _step_plan(state["current_plan"], step, state["run_count"], attempt)
+        validate_plan(step_plan, for_execution=True)
+        write_plan_and_meta(run_dir, step_plan, meta)
+        execution = execute_plan(step_plan, run_dir)
+
+        step_result = execution["results"][0] if execution.get("results") else {
+            "id": step_id,
+            "tool": step.get("tool"),
+            "exit_code": -1,
+            "timed_out": False,
+            "elapsed_sec": 0.0,
+            "stdout_file": "",
+            "stderr_file": "",
+        }
+
+        valid, failures, io = _validate_step_result(step, step_result)
+        state["tool_outputs"][step_id] = {
+            "exit_code": step_result.get("exit_code"),
+            "timed_out": step_result.get("timed_out"),
+            "elapsed_sec": step_result.get("elapsed_sec"),
+            "stdout_excerpt": io["stdout"],
+            "stderr_excerpt": io["stderr"],
+            "stdout_truncated": io["stdout_truncated"],
+            "stderr_truncated": io["stderr_truncated"],
+        }
+        state["artifacts"][step_id] = [
+            step_result.get("stdout_file"),
+            step_result.get("stderr_file"),
+        ]
+
+        state["log"]["step_runs"].append(
+            {
+                "run_index": state["run_count"],
+                "step_id": step_id,
+                "description": step.get("description"),
+                "planning_mode": state["planning_mode"],
+                "attempt": attempt,
+                "success": valid,
+                "validation_failures": failures,
+                "result": step_result,
+                "artifacts": state["artifacts"][step_id],
+            }
+        )
+
+        if valid:
+            if step_id not in state["completed_steps"]:
+                state["completed_steps"].append(step_id)
+            state["planning_mode"] = "continuation_append"
+            write_json(session_dir / "session_state.json", state)
+            continue
+
+        allowed_retries = min(max_retries, int(step.get("retry_policy", {}).get("max_retries", 0)))
+        if attempt <= allowed_retries:
+            state["planning_mode"] = "initial"
+            write_json(session_dir / "session_state.json", state)
+            continue
+
+        state["failed_steps"].append(
+            {
+                "step_id": step_id,
+                "attempt": attempt,
+                "validation_failures": failures,
+                "result": step_result,
+            }
+        )
+
+        continuation_added = False
+        if state["continuation_expansions"] < max_expansions:
+            state["planning_mode"] = "continuation_append"
+            new_steps, reason = _generate_continuation_steps(
+                goal=original_prompt,
+                plan=state["current_plan"],
+                state=state,
+                model_path=model_path,
+                n_ctx=n_ctx,
+                temp=temp,
+                seed=seed,
+                log_dir=history_dir / f"continuation_{state['continuation_expansions'] + 1:03d}",
+                id_prefix=f"recover_{state['continuation_expansions'] + 1:03d}",
+            )
+            state["continuation_expansions"] += 1
+            if new_steps:
+                continuation_added = True
+                state["current_plan"]["steps"].extend(new_steps)
+                state["log"]["appended_steps"].append(
+                    {"reason": reason, "steps": new_steps, "at_run": state["run_count"]}
+                )
+                validate_plan(state["current_plan"], for_execution=False)
+
+        if continuation_added:
+            write_json(session_dir / "session_state.json", state)
+            continue
+
+        if state["replanning_attempts"] < max_replans:
+            state["planning_mode"] = "full_replan"
+            replanned = _generate_full_replan(
+                goal=original_prompt,
+                state=state,
+                failure_reason=f"Step failed after retries: {step_id}",
+                model_path=model_path,
+                n_ctx=n_ctx,
+                temp=temp,
+                seed=seed,
+                log_dir=history_dir / f"replan_{state['replanning_attempts'] + 1:03d}",
+            )
+            state["replanning_attempts"] += 1
+            state["current_plan"] = replanned
+            state["log"]["replans"].append(
+                {
+                    "index": state["replanning_attempts"],
+                    "reason": f"Step failed after retries: {step_id}",
+                    "plan": replanned,
+                }
+            )
+            write_json(session_dir / "session_state.json", state)
+            continue
+
+        state["summary"] = f"stopped: step {step_id} failed and limits reached"
+        break
+
+    state["finished_at"] = _utc_now()
+    write_json(session_dir / "session_state.json", state)
+
+    session_log = {
+        "mode": "multi_step",
+        "summary": state["summary"],
+        "goal": original_prompt,
+        "completed_steps": state["completed_steps"],
+        "failed_steps": state["failed_steps"],
+        "pending_steps": state["pending_steps"],
+        "continuation_expansions": state["continuation_expansions"],
+        "replanning_attempts": state["replanning_attempts"],
+        "run_count": state["run_count"],
+        "log": state["log"],
+        "session_dir": str(session_dir),
+        "started_at": state["started_at"],
+        "finished_at": state["finished_at"],
+    }
+    write_json(session_dir / "session.json", session_log)
+    write_json(session_dir / "final.json", session_log)
+    return {
+        "summary": state["summary"],
+        "iterations": state["run_count"],
+        "session_dir": str(session_dir),
+        "mode": "multi_step",
+    }
+
+
+def run_agent_loop(
+    *,
+    session_dir: Path,
+    original_prompt: str,
+    initial_plan: dict,
+    meta: dict,
+    model_path: str,
+    n_ctx: int,
+    temp: float,
+    seed: int,
+    max_steps: int = 5,
+    multi_step_mode: bool = False,
+    max_retries: int = 1,
+    max_expansions: int = 2,
+    max_replans: int = 1,
+    max_runtime_sec: int | None = None,
+) -> dict:
+    if not multi_step_mode:
+        return _run_agent_loop_legacy(
+            session_dir=session_dir,
+            original_prompt=original_prompt,
+            initial_plan=initial_plan,
+            meta=meta,
+            model_path=model_path,
+            n_ctx=n_ctx,
+            temp=temp,
+            seed=seed,
+            max_steps=max_steps,
+        )
+    return _run_agent_loop_multi_step(
+        session_dir=session_dir,
+        original_prompt=original_prompt,
+        initial_plan=initial_plan,
+        meta=meta,
+        model_path=model_path,
+        n_ctx=n_ctx,
+        temp=temp,
+        seed=seed,
+        max_steps=max_steps,
+        max_retries=max_retries,
+        max_expansions=max_expansions,
+        max_replans=max_replans,
+        max_runtime_sec=max_runtime_sec,
+    )

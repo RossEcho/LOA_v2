@@ -61,6 +61,26 @@ Use menu option **Configure model paths** to persist:
 
 Run from repo root.
 
+### Unified entrypoint (`main.py`)
+
+Top-level menu:
+
+```bash
+python main.py
+```
+
+LOA CLI pass-through (example):
+
+```bash
+python main.py loa agent "check host connectivity" --multi-step --max-steps 8
+```
+
+Assistant mode (example):
+
+```bash
+python main.py assistant --once "hello"
+```
+
 ### Interactive menu
 
 ```bash
@@ -93,6 +113,20 @@ python src/loa.py ask "check host connectivity"
 python src/loa.py ask "check host connectivity" --yes
 ```
 
+### Agent runtime modes
+
+One-shot mode (existing behavior):
+
+```bash
+python src/loa.py agent "check host connectivity" --max-steps 5
+```
+
+Multi-step mode (sequential execution with continuation + bounded replanning):
+
+```bash
+python src/loa.py agent "check host connectivity" --multi-step --max-steps 12 --max-retries 1 --max-expansions 2 --max-replans 1
+```
+
 ## Session layout
 
 Each run writes to:
@@ -111,6 +145,18 @@ Contents:
 	- `timing.json`
 	- optional copied tool output files.
 - `final.json` (or plan-defined final file): aggregated execution result.
+- `session_state.json` (multi-step mode): live state with current plan, completed/pending/failed steps, tool output summaries, artifacts, appended continuation steps, and replan history.
+- `multi_step/` (multi-step mode): per-step atomic executions (`run_###_...`) plus continuation/replan LLM logs.
+
+## Minimal multi-step example
+
+With `--multi-step`, LOA can execute a plan like:
+
+1. `s1`: ping primary host
+2. `s2`: ping secondary host (depends on `s1`)
+3. continuation append: model adds `s3` if follow-up verification is needed
+
+The runtime executes each step sequentially using the existing atomic executor, validates success criteria, and appends continuation steps without replacing the existing plan unless a full replan is triggered.
 
 ## Safety and determinism
 

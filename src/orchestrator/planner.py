@@ -16,6 +16,10 @@ class PlanValidationError(ValueError):
     pass
 
 
+DEFAULT_SUCCESS_CRITERIA = {"type": "exit_code", "equals": 0}
+DEFAULT_RETRY_POLICY = {"max_retries": 0}
+
+
 def sanitize_session_name(value: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", (value or "session").strip()).strip("._-")
     if not cleaned:
@@ -60,7 +64,16 @@ def _validate_against_schema(plan: dict) -> None:
     if not isinstance(steps, list):
         raise PlanValidationError("schema validation failed: steps must be array")
 
-    allowed_step = {"id", "tool", "args", "timeout_sec"}
+    allowed_step = {
+        "id",
+        "description",
+        "tool",
+        "args",
+        "timeout_sec",
+        "depends_on",
+        "success_criteria",
+        "retry_policy",
+    }
     for idx, step in enumerate(steps, start=1):
         if not isinstance(step, dict):
             raise PlanValidationError(f"schema validation failed: steps[{idx}] must be object")
@@ -70,8 +83,76 @@ def _validate_against_schema(plan: dict) -> None:
             raise PlanValidationError(
                 f"schema validation failed: steps[{idx}] unknown fields: {keys}"
             )
+
+
+def _normalize_step_defaults(plan: dict) -> None:
+    if not isinstance(plan, dict):
+        return
+    steps = plan.get("steps")
+    if not isinstance(steps, list):
+        return
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+
+        tool_name = step.get("tool")
+        step_id = step.get("id")
+        if not isinstance(step.get("description"), str) or not step.get("description", "").strip():
+            if isinstance(tool_name, str) and tool_name.strip():
+                step["description"] = f"Execute tool '{tool_name}'"
+            elif isinstance(step_id, str) and step_id.strip():
+                step["description"] = f"Execute step '{step_id}'"
+            else:
+                step["description"] = "Execute step"
+
+        depends_on = step.get("depends_on")
+        if depends_on is None:
+            step["depends_on"] = []
+
+        success_criteria = step.get("success_criteria")
+        if not isinstance(success_criteria, dict):
+            step["success_criteria"] = dict(DEFAULT_SUCCESS_CRITERIA)
+        else:
+            merged_success = dict(DEFAULT_SUCCESS_CRITERIA)
+            merged_success.update(success_criteria)
+            step["success_criteria"] = merged_success
+
+        retry_policy = step.get("retry_policy")
+        if not isinstance(retry_policy, dict):
+            step["retry_policy"] = dict(DEFAULT_RETRY_POLICY)
+        else:
+            merged_retry = dict(DEFAULT_RETRY_POLICY)
+            merged_retry.update(retry_policy)
+            step["retry_policy"] = merged_retry
+
+
+def _validate_success_criteria(name: str, payload: dict) -> None:
+    if not isinstance(payload, dict):
+        raise PlanValidationError(f"{name} must be object")
+    criteria_type = payload.get("type")
+    if criteria_type != "exit_code":
+        raise PlanValidationError(f"{name}.type must be 'exit_code'")
+    equals = payload.get("equals")
+    if not isinstance(equals, int):
+        raise PlanValidationError(f"{name}.equals must be integer")
+    for field in ("stdout_contains", "stderr_contains"):
+        value = payload.get(field, [])
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise PlanValidationError(f"{name}.{field} must be string[]")
+
+
+def _validate_retry_policy(name: str, payload: dict) -> None:
+    if not isinstance(payload, dict):
+        raise PlanValidationError(f"{name} must be object")
+    max_retries = payload.get("max_retries")
+    if not isinstance(max_retries, int) or max_retries < 0 or max_retries > 10:
+        raise PlanValidationError(f"{name}.max_retries must be integer 0..10")
+
+
 def validate_plan(plan: dict, *, for_execution: bool) -> None:
     _strip_legacy_outputs(plan)
+    _normalize_step_defaults(plan)
     _validate_against_schema(plan)
     _expect_type("plan", plan, dict)
     for required in ("plan_id", "session_name", "steps", "final_output"):
@@ -93,12 +174,15 @@ def validate_plan(plan: dict, *, for_execution: bool) -> None:
     seen_ids: set[str] = set()
     for idx, step in enumerate(plan["steps"], start=1):
         _expect_type(f"steps[{idx}]", step, dict)
-        for field in ("id", "tool", "args"):
+        for field in ("id", "description", "tool", "args", "success_criteria", "retry_policy"):
             if field not in step:
                 raise PlanValidationError(f"steps[{idx}] missing field: {field}")
         _expect_type(f"steps[{idx}].id", step["id"], str)
+        _expect_type(f"steps[{idx}].description", step["description"], str)
         _expect_type(f"steps[{idx}].tool", step["tool"], str)
         _expect_type(f"steps[{idx}].args", step["args"], dict)
+        _validate_success_criteria(f"steps[{idx}].success_criteria", step["success_criteria"])
+        _validate_retry_policy(f"steps[{idx}].retry_policy", step["retry_policy"])
 
         step_id = step["id"].strip()
         if not step_id:
@@ -121,6 +205,21 @@ def validate_plan(plan: dict, *, for_execution: bool) -> None:
         timeout = step.get("timeout_sec")
         if timeout is not None and (not isinstance(timeout, int) or timeout < 1 or timeout > 3600):
             raise PlanValidationError(f"steps[{idx}].timeout_sec must be integer 1..3600")
+
+        depends_on = step.get("depends_on", [])
+        if not isinstance(depends_on, list) or any(
+            not isinstance(item, str) or not item.strip() for item in depends_on
+        ):
+            raise PlanValidationError(f"steps[{idx}].depends_on must be non-empty string[]")
+
+    known_ids = {step["id"] for step in plan["steps"] if isinstance(step, dict) and "id" in step}
+    for idx, step in enumerate(plan["steps"], start=1):
+        depends_on = step.get("depends_on", [])
+        unknown = [dep for dep in depends_on if dep not in known_ids]
+        if unknown:
+            raise PlanValidationError(
+                f"steps[{idx}].depends_on references unknown steps: {', '.join(unknown)}"
+            )
 
     notes = plan.get("notes")
     if notes is not None and not isinstance(notes, str):
@@ -150,6 +249,10 @@ def _planner_prompt(user_prompt: str, tools_meta: list[dict]) -> str:
             "Only use tools listed in tools_meta.",
             "Use steps only when a tool is required.",
             "Prefer minimal step count.",
+            "Each step must include a natural-language description.",
+            "Each step must include success_criteria with type=exit_code and equals=0 unless caller requires stricter checks.",
+            "Use depends_on only when a step requires prior step outputs.",
+            "Set retry_policy.max_retries conservatively (usually 0 or 1).",
             "Plan includes only tool choices and arguments (and optional timeout_sec); never include execution results.",
             "Do not output latency, reachability, success/failure, or any measured runtime values.",
             "Do not include outputs, file paths, or artifact locations in steps.",

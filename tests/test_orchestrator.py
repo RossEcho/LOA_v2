@@ -71,6 +71,23 @@ class TestOrchestratorPlannerValidation(unittest.TestCase):
         validate_plan(plan, for_execution=False)
         self.assertNotIn("outputs", plan["steps"][0])
 
+    def test_unknown_dependency_rejected(self):
+        plan = {
+            "plan_id": "p_dep",
+            "session_name": "x",
+            "steps": [
+                {
+                    "id": "s1",
+                    "tool": "ping",
+                    "args": {"target": "8.8.8.8"},
+                    "depends_on": ["missing"],
+                }
+            ],
+            "final_output": "final.json",
+        }
+        with self.assertRaises(PlanValidationError):
+            validate_plan(plan, for_execution=False)
+
 
 class TestToolRegistryValidation(unittest.TestCase):
     def test_ping_args_validation(self):
