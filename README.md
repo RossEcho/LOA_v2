@@ -81,6 +81,16 @@ Assistant mode (example):
 python main.py assistant --once "hello"
 ```
 
+Onboard a CLI tool from `-h/--help` into small JSON metadata:
+
+```bash
+python main.py assistant --init-tool nmap
+python main.py assistant --tool-spec nmap
+python main.py assistant --list-tools
+```
+
+Assistant mode now prints decision/tool logs and resolved command previews before the final response.
+
 ### Interactive menu
 
 ```bash
@@ -126,6 +136,8 @@ Multi-step mode (sequential execution with continuation + bounded replanning):
 ```bash
 python src/loa.py agent "check host connectivity" --multi-step --max-steps 12 --max-retries 1 --max-expansions 2 --max-replans 1
 ```
+
+By default, `agent` prints planning/thinking logs (step execution, continuation appends, replans). Use `--quiet-thinking` to suppress them.
 
 ## Session layout
 

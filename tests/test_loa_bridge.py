@@ -11,6 +11,12 @@ class TestLoaBridge(unittest.TestCase):
         names = {tool["name"] for tool in tools}
         self.assertIn("ping", names)
 
+    @patch("src.loa_bridge.load_registry", return_value={"tools": [{"name": "python", "version": "3.12", "path": "/usr/bin/python"}]})
+    def test_list_tools_includes_onboarded(self, _registry_mock):
+        tools = _list_tools()
+        names = {tool["name"] for tool in tools}
+        self.assertIn("python", names)
+
     @patch("src.loa_bridge.rollback")
     @patch("src.loa_bridge.snapshot", return_value="abc123")
     @patch("src.loa_bridge.subprocess.run")
@@ -33,6 +39,7 @@ class TestLoaBridge(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertEqual(result["exit_code"], 0)
+        self.assertIn("command_preview", result)
         snapshot_mock.assert_called_once()
         rollback_mock.assert_not_called()
 

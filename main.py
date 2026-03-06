@@ -11,6 +11,8 @@ from src.tool_onboarding import ToolOnboardingError, init_tool, load_registry, l
 
 def _run_once(assistant: AssistantCore, message: str) -> int:
     result = assistant.handle_user_input(message)
+    for line in result.get("logs", []) or []:
+        print(f"log> {line}")
     print(result["response"])
     return 0
 
@@ -26,6 +28,8 @@ def _run_repl(assistant: AssistantCore) -> int:
         if message.lower() in {"exit", "quit"}:
             return 0
         result = assistant.handle_user_input(message)
+        for line in result.get("logs", []) or []:
+            print(f"log> {line}")
         print(f"assistant> {result['response']}")
 
 

@@ -167,6 +167,7 @@ def _agent_from_prompt(
     max_expansions: int,
     max_replans: int,
     max_runtime_sec: int | None,
+    show_thinking: bool,
 ) -> int:
     model_path = _resolve_model_path()
     n_ctx = int(os.getenv("LOA_N_CTX", "2048"))
@@ -202,6 +203,7 @@ def _agent_from_prompt(
         max_expansions=max_expansions,
         max_replans=max_replans,
         max_runtime_sec=max_runtime_sec,
+        verbose=show_thinking,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
@@ -272,6 +274,7 @@ def _interactive_menu() -> int:
                 max_expansions=2,
                 max_replans=1,
                 max_runtime_sec=None,
+                show_thinking=True,
             )
             continue
 
@@ -308,6 +311,7 @@ def main() -> int:
     agent_cmd.add_argument("--max-expansions", type=int, default=2, help="Maximum continuation appends in multi-step mode")
     agent_cmd.add_argument("--max-replans", type=int, default=1, help="Maximum full replans in multi-step mode")
     agent_cmd.add_argument("--max-runtime-sec", type=int, default=None, help="Optional runtime limit for multi-step mode")
+    agent_cmd.add_argument("--quiet-thinking", action="store_true", help="Disable planning/thinking logs")
 
     args = parser.parse_args()
 
@@ -329,6 +333,7 @@ def main() -> int:
             max_expansions=max(0, int(args.max_expansions)),
             max_replans=max(0, int(args.max_replans)),
             max_runtime_sec=(None if args.max_runtime_sec is None else max(1, int(args.max_runtime_sec))),
+            show_thinking=(not bool(args.quiet_thinking)),
         )
     return 1
 

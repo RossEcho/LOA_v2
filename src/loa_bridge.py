@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -14,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.orchestrator.tools import ToolValidationError, get_tool, list_execution_tools, validate_tool_args
 from src.savestate_git import rollback, snapshot
+from src.tool_onboarding import load_registry, load_tool_spec
 
 ACTION_CLASSES = {"READ", "WRITE", "NETWORK", "SYSTEM"}
 
@@ -89,24 +91,119 @@ def _validate_call(call: dict) -> dict:
 
 
 def _list_tools() -> list[dict]:
-    return list_execution_tools()
+    built_in = list_execution_tools()
+    built_in_names = {item.get("name") for item in built_in if isinstance(item, dict)}
+
+    merged = list(built_in)
+    registry = load_registry()
+    for entry in registry.get("tools", []):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip() or name in built_in_names:
+            continue
+        merged.append(
+            {
+                "name": name,
+                "version": entry.get("version", "unknown"),
+                "description": f"Onboarded CLI tool ({entry.get('path', 'unknown path')})",
+                "action_class": "SYSTEM",
+                "args_schema": {"type": "object"},
+            }
+        )
+    return merged
+
+
+def _onboarded_tool_entry(tool_name: str) -> dict | None:
+    registry = load_registry()
+    for entry in registry.get("tools", []):
+        if isinstance(entry, dict) and entry.get("name") == tool_name:
+            return entry
+    return None
+
+
+def _norm_option_key(value: str) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
+
+
+def _resolve_flag(spec: dict, arg_key: str) -> str:
+    options = spec.get("options")
+    if not isinstance(options, dict):
+        return f"--{arg_key.replace('_', '-')}"
+
+    wanted = _norm_option_key(arg_key)
+    direct = options.get(arg_key)
+    if isinstance(direct, dict):
+        flags = direct.get("flags")
+        if isinstance(flags, list) and flags:
+            long_flag = next((f for f in flags if isinstance(f, str) and f.startswith("--")), None)
+            return long_flag or str(flags[0])
+
+    for key, option in options.items():
+        if _norm_option_key(key) == wanted and isinstance(option, dict):
+            flags = option.get("flags")
+            if isinstance(flags, list) and flags:
+                long_flag = next((f for f in flags if isinstance(f, str) and f.startswith("--")), None)
+                return long_flag or str(flags[0])
+    return f"--{arg_key.replace('_', '-')}"
+
+
+def _build_onboarded_argv(tool_name: str, tool_path: str, spec: dict, args: dict) -> list[str]:
+    argv: list[str] = [tool_path or tool_name]
+    positional = args.get("_positional", [])
+    for key, value in args.items():
+        if key == "_positional":
+            continue
+        flag = _resolve_flag(spec, key)
+        if isinstance(value, bool):
+            if value:
+                argv.append(flag)
+            continue
+        if isinstance(value, list):
+            for item in value:
+                argv.extend([flag, str(item)])
+            continue
+        if value is None:
+            continue
+        argv.extend([flag, str(value)])
+
+    if isinstance(positional, list):
+        for item in positional:
+            argv.append(str(item))
+    return argv
 
 
 def _dispatch_tool(call: dict) -> dict:
     validated = _validate_call(call)
+    tool = None
+    argv: list[str]
+    tool_name = validated["tool_name"]
+    display_name = tool_name
 
     try:
-        tool = get_tool(validated["tool_name"])
-    except ToolValidationError as exc:
-        return _error_result(str(exc), exit_code=2)
+        tool = get_tool(tool_name)
+    except ToolValidationError:
+        tool = None
 
-    if not tool.enabled_for_execution:
-        return _error_result(f"tool disabled for execution: {tool.name}", exit_code=2)
-
-    try:
-        validate_tool_args(tool.name, validated["args"])
-    except ToolValidationError as exc:
-        return _error_result(str(exc), exit_code=2)
+    if tool is not None:
+        if not tool.enabled_for_execution:
+            return _error_result(f"tool disabled for execution: {tool.name}", exit_code=2)
+        try:
+            validate_tool_args(tool.name, validated["args"])
+        except ToolValidationError as exc:
+            return _error_result(str(exc), exit_code=2)
+        argv = tool.command_builder(validated["args"])
+        display_name = tool.name
+    else:
+        entry = _onboarded_tool_entry(tool_name)
+        if entry is None:
+            return _error_result(f"unknown tool: {tool_name}", exit_code=2)
+        try:
+            spec = load_tool_spec(tool_name)
+        except Exception as exc:
+            return _error_result(f"tool spec not found: {tool_name} ({exc})", exit_code=2)
+        tool_path = str(entry.get("path") or tool_name)
+        argv = _build_onboarded_argv(tool_name, tool_path, spec, validated["args"])
 
     timeout_seconds = validated["timeout_seconds"]
     timeout = int(timeout_seconds) if timeout_seconds is not None else 60
@@ -116,11 +213,11 @@ def _dispatch_tool(call: dict) -> dict:
         run_env.update(validated["env"])
 
     run_cwd = Path(validated["cwd"]).expanduser().resolve() if validated["cwd"] else PROJECT_ROOT
-    argv = tool.command_builder(validated["args"])
+    command_preview = " ".join(shlex.quote(part) for part in argv)
 
     checkpoint_hash = None
     if validated["action_class"] in {"WRITE", "NETWORK", "SYSTEM"}:
-        checkpoint_hash = snapshot(f"before {tool.name}")
+        checkpoint_hash = snapshot(f"before {display_name}")
 
     started = time.perf_counter()
     try:
@@ -156,6 +253,7 @@ def _dispatch_tool(call: dict) -> dict:
         "stderr": stderr,
         "duration_ms": duration_ms,
         "artifacts": [],
+        "command_preview": command_preview,
     }
 
 

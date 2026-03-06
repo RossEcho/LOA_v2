@@ -1,0 +1,10 @@
+{
+  "name": "python",
+  "version": "Python 3.12.4",
+  "help_cmd": [
+    "python",
+    "-h"
+  ],
+  "help_hash": "4f21e4a5bcbb670d84ed4f5f6ad685bdb7305024115150c92d66b16dba479db2",
+  "options": {}
+}

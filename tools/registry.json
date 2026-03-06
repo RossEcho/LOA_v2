@@ -1,3 +1,9 @@
 {
-  "tools": []
+  "tools": [
+    {
+      "name": "python",
+      "version": "Python 3.12.4",
+      "path": "C:\\Python312\\python.EXE"
+    }
+  ]
 }

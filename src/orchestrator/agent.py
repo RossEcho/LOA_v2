@@ -20,6 +20,11 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _vlog(enabled: bool, message: str) -> None:
+    if enabled:
+        print(f"[agent] {message}")
+
+
 def _collect_output_snapshot(path: Path, max_inline_chars: int = 4000) -> dict:
     snapshot = {
         "path": str(path),
@@ -655,6 +660,7 @@ def _run_agent_loop_legacy(
     temp: float,
     seed: int,
     max_steps: int,
+    verbose: bool,
 ) -> dict:
     session_dir.mkdir(parents=True, exist_ok=True)
     iterations_dir = session_dir / "iterations"
@@ -674,6 +680,7 @@ def _run_agent_loop_legacy(
     final_summary = "agent_finished"
 
     for idx in range(1, max_steps + 1):
+        _vlog(verbose, f"legacy iteration={idx} planning_mode=initial")
         iter_dir = iterations_dir / f"iter_{idx:03d}"
         iter_dir.mkdir(parents=True, exist_ok=True)
 
@@ -681,6 +688,7 @@ def _run_agent_loop_legacy(
             validate_plan(plan, for_execution=True)
             execution = execute_plan(plan, iter_dir)
             write_plan_and_meta(iter_dir, plan, meta)
+            _vlog(verbose, f"executed plan_id={plan.get('plan_id')} success={execution.get('success')}")
         except Exception as exc:
             execution = _failed_execution(plan, f"execution_failed: {exc}")
             write_json(iter_dir / "plan.json", plan)
@@ -820,10 +828,12 @@ def _run_agent_loop_legacy(
 
         if decision.get("action") == "stop":
             final_summary = decision.get("reason", "finished")
+            _vlog(verbose, f"stop decision: {final_summary}")
             break
 
         if decision.get("action") == "respond":
             final_summary = response or decision.get("reason", "respond")
+            _vlog(verbose, f"respond decision: {final_summary}")
             break
 
         if decision.get("action") != "run_tool":
@@ -869,6 +879,7 @@ def _run_agent_loop_multi_step(
     max_expansions: int,
     max_replans: int,
     max_runtime_sec: int | None,
+    verbose: bool,
 ) -> dict:
     session_dir.mkdir(parents=True, exist_ok=True)
     validate_plan(initial_plan, for_execution=False)
@@ -949,6 +960,7 @@ def _run_agent_loop_multi_step(
                     state["summary"] = "stopped: invalid dependency graph and replan limit reached"
                     break
                 state["planning_mode"] = "full_replan"
+                _vlog(verbose, "trigger full_replan: no executable step due to dependencies")
                 replanned = _generate_full_replan(
                     goal=original_prompt,
                     state=state,
@@ -973,6 +985,7 @@ def _run_agent_loop_multi_step(
 
             if state["continuation_expansions"] < max_expansions:
                 state["planning_mode"] = "continuation_append"
+                _vlog(verbose, "trigger continuation_append: pending empty")
                 new_steps, reason = _generate_continuation_steps(
                     goal=original_prompt,
                     plan=state["current_plan"],
@@ -986,6 +999,7 @@ def _run_agent_loop_multi_step(
                 )
                 state["continuation_expansions"] += 1
                 if new_steps:
+                    _vlog(verbose, f"appended continuation steps={len(new_steps)} reason={reason}")
                     state["current_plan"]["steps"].extend(new_steps)
                     state["log"]["appended_steps"].append(
                         {"reason": reason, "steps": new_steps, "at_run": state["run_count"]}
@@ -994,6 +1008,7 @@ def _run_agent_loop_multi_step(
                     write_json(session_dir / "session_state.json", state)
                     continue
             state["summary"] = "success"
+            _vlog(verbose, "all steps complete; success")
             break
 
         step_id = step["id"]
@@ -1002,6 +1017,7 @@ def _run_agent_loop_multi_step(
         state["run_count"] += 1
 
         run_dir = history_dir / f"run_{state['run_count']:03d}_{step_id}_try{attempt}"
+        _vlog(verbose, f"execute step={step_id} attempt={attempt} mode={state['planning_mode']}")
         run_dir.mkdir(parents=True, exist_ok=True)
         step_plan = _step_plan(state["current_plan"], step, state["run_count"], attempt)
         validate_plan(step_plan, for_execution=True)
@@ -1050,12 +1066,14 @@ def _run_agent_loop_multi_step(
         if valid:
             if step_id not in state["completed_steps"]:
                 state["completed_steps"].append(step_id)
+            _vlog(verbose, f"step success: {step_id}")
             state["planning_mode"] = "continuation_append"
             write_json(session_dir / "session_state.json", state)
             continue
 
         allowed_retries = min(max_retries, int(step.get("retry_policy", {}).get("max_retries", 0)))
         if attempt <= allowed_retries:
+            _vlog(verbose, f"step retry: {step_id} attempt={attempt}/{allowed_retries}")
             state["planning_mode"] = "initial"
             write_json(session_dir / "session_state.json", state)
             continue
@@ -1072,6 +1090,7 @@ def _run_agent_loop_multi_step(
         continuation_added = False
         if state["continuation_expansions"] < max_expansions:
             state["planning_mode"] = "continuation_append"
+            _vlog(verbose, f"step failed, attempting continuation recovery: {step_id}")
             new_steps, reason = _generate_continuation_steps(
                 goal=original_prompt,
                 plan=state["current_plan"],
@@ -1086,6 +1105,7 @@ def _run_agent_loop_multi_step(
             state["continuation_expansions"] += 1
             if new_steps:
                 continuation_added = True
+                _vlog(verbose, f"recovery appended steps={len(new_steps)} reason={reason}")
                 state["current_plan"]["steps"].extend(new_steps)
                 state["log"]["appended_steps"].append(
                     {"reason": reason, "steps": new_steps, "at_run": state["run_count"]}
@@ -1098,6 +1118,7 @@ def _run_agent_loop_multi_step(
 
         if state["replanning_attempts"] < max_replans:
             state["planning_mode"] = "full_replan"
+            _vlog(verbose, f"step failed, triggering full_replan: {step_id}")
             replanned = _generate_full_replan(
                 goal=original_prompt,
                 state=state,
@@ -1121,6 +1142,7 @@ def _run_agent_loop_multi_step(
             continue
 
         state["summary"] = f"stopped: step {step_id} failed and limits reached"
+        _vlog(verbose, state["summary"])
         break
 
     state["finished_at"] = _utc_now()
@@ -1167,6 +1189,7 @@ def run_agent_loop(
     max_expansions: int = 2,
     max_replans: int = 1,
     max_runtime_sec: int | None = None,
+    verbose: bool = True,
 ) -> dict:
     if not multi_step_mode:
         return _run_agent_loop_legacy(
@@ -1179,6 +1202,7 @@ def run_agent_loop(
             temp=temp,
             seed=seed,
             max_steps=max_steps,
+            verbose=verbose,
         )
     return _run_agent_loop_multi_step(
         session_dir=session_dir,
@@ -1194,4 +1218,5 @@ def run_agent_loop(
         max_expansions=max_expansions,
         max_replans=max_replans,
         max_runtime_sec=max_runtime_sec,
+        verbose=verbose,
     )

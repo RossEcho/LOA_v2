@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -144,6 +145,81 @@ class AssistantCore:
         if decision["tool_name"] not in known_tools:
             raise AssistantError(f"unknown tool in decision: {decision['tool_name']}")
 
+    def _is_ping_request(self, user_input: str) -> bool:
+        return isinstance(user_input, str) and "ping" in user_input.lower()
+
+    def _extract_ping_targets(self, user_input: str, max_targets: int = 16) -> tuple[list[str], bool]:
+        if not isinstance(user_input, str):
+            return [], False
+
+        lowered = user_input.lower()
+        targets: list[str] = []
+        seen: set[str] = set()
+        truncated = False
+
+        range_pattern = re.compile(r"\b((?:\d{1,3}\.){3})(\d{1,3})\s*-\s*(\d{1,3})\b")
+        for match in range_pattern.finditer(lowered):
+            prefix = match.group(1)
+            start = int(match.group(2))
+            end = int(match.group(3))
+            lo = max(1, min(start, end))
+            hi = min(254, max(start, end))
+            for octet in range(lo, hi + 1):
+                target = f"{prefix}{octet}"
+                if target in seen:
+                    continue
+                targets.append(target)
+                seen.add(target)
+                if len(targets) >= max_targets:
+                    truncated = True
+                    return targets, truncated
+
+        ip_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+        host_pattern = re.compile(r"\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b")
+
+        for pattern in (ip_pattern, host_pattern):
+            for match in pattern.finditer(user_input):
+                value = match.group(0)
+                if value in seen:
+                    continue
+                targets.append(value)
+                seen.add(value)
+                if len(targets) >= max_targets:
+                    truncated = True
+                    return targets, truncated
+
+        return targets, truncated
+
+    def _ping_decisions_from_input(self, user_input: str, base_decision: dict | None = None) -> tuple[list[dict], bool]:
+        targets, truncated = self._extract_ping_targets(user_input)
+        if not targets and isinstance(base_decision, dict):
+            args = base_decision.get("args")
+            target = args.get("target") if isinstance(args, dict) else None
+            if isinstance(target, str) and target.strip():
+                targets = [target.strip()]
+
+        if not targets:
+            return [], truncated
+
+        timeout = None
+        if isinstance(base_decision, dict):
+            timeout = base_decision.get("timeout_seconds")
+
+        decisions: list[dict] = []
+        for target in targets:
+            args = {"target": target, "count": 1}
+            decisions.append(
+                {
+                    "action": "tool",
+                    "tool_name": "ping",
+                    "args": args,
+                    "action_class": "NETWORK",
+                    "timeout_seconds": timeout,
+                    "response": None,
+                }
+            )
+        return decisions, truncated
+
     def _run_tool(self, decision: dict) -> dict:
         call = {
             "tool_name": decision["tool_name"],
@@ -157,6 +233,26 @@ class AssistantCore:
         if not isinstance(result, dict):
             raise AssistantError("bridge call result must be a JSON object")
         return {"call": call, "result": result}
+
+    def _summarize_batch_ping(self, tool_execs: list[dict], *, truncated: bool) -> str:
+        ok = 0
+        failed = 0
+        details: list[str] = []
+        for item in tool_execs:
+            call = item["call"]
+            result = item["result"]
+            target = call["args"].get("target", "unknown")
+            if result.get("ok"):
+                ok += 1
+                details.append(f"{target}: ok")
+            else:
+                failed += 1
+                err = (result.get("stderr") or "").strip()
+                details.append(f"{target}: failed ({err or 'no error details'})")
+        prefix = f"Ping summary: {ok} succeeded, {failed} failed."
+        if truncated:
+            prefix += " Target list was truncated to keep execution bounded."
+        return prefix + "\n" + "\n".join(details)
 
     def _finalize_response(self, user_input: str, tool_call: dict, tool_result: dict) -> str:
         text = self._llm_text(
@@ -178,19 +274,63 @@ class AssistantCore:
         decision = self._decide(user_input)
         self._validate_decision(decision)
 
+        if self._is_ping_request(user_input):
+            ping_decisions: list[dict] = []
+            truncated = False
+            if decision.get("action") == "respond":
+                ping_decisions, truncated = self._ping_decisions_from_input(user_input)
+            elif decision.get("action") == "tool" and decision.get("tool_name") == "ping":
+                ping_decisions, truncated = self._ping_decisions_from_input(user_input, decision)
+
+            if ping_decisions:
+                if len(ping_decisions) == 1:
+                    tool_exec = self._run_tool(ping_decisions[0])
+                    response = self._finalize_response(user_input, tool_exec["call"], tool_exec["result"])
+                    logs = [f"decision override: tool=ping targets=1"]
+                    preview = tool_exec["result"].get("command_preview")
+                    if isinstance(preview, str) and preview.strip():
+                        logs.append(f"command: {preview}")
+                    return {
+                        "response": response,
+                        "decision": ping_decisions[0],
+                        "tool_call": tool_exec["call"],
+                        "tool_result": tool_exec["result"],
+                        "logs": logs,
+                    }
+
+                tool_execs = [self._run_tool(ping_decision) for ping_decision in ping_decisions]
+                logs = [f"decision override: tool=ping targets={len(tool_execs)}"]
+                for item in tool_execs:
+                    preview = item["result"].get("command_preview")
+                    if isinstance(preview, str) and preview.strip():
+                        logs.append(f"command: {preview}")
+                return {
+                    "response": self._summarize_batch_ping(tool_execs, truncated=truncated),
+                    "decision": {"action": "tool_batch", "tool_name": "ping", "count": len(tool_execs)},
+                    "tool_call": [item["call"] for item in tool_execs],
+                    "tool_result": [item["result"] for item in tool_execs],
+                    "logs": logs,
+                }
+
         if decision["action"] == "respond":
             return {
                 "response": decision["response"],
                 "decision": decision,
                 "tool_call": None,
                 "tool_result": None,
+                "logs": [f"decision: respond"],
             }
 
         tool_exec = self._run_tool(decision)
         response = self._finalize_response(user_input, tool_exec["call"], tool_exec["result"])
+        logs = [f"decision: tool={decision['tool_name']} action_class={decision['action_class']}"]
+        preview = tool_exec["result"].get("command_preview")
+        if isinstance(preview, str) and preview.strip():
+            logs.append(f"command: {preview}")
         return {
             "response": response,
             "decision": decision,
             "tool_call": tool_exec["call"],
             "tool_result": tool_exec["result"],
+            "logs": logs,
         }
