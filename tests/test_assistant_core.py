@@ -479,6 +479,54 @@ class TestAssistantCore(unittest.TestCase):
         self.assertIn("Pentest findings:", result["response"])
         self.assertEqual(calls["final"], 1)
 
+    def test_invalid_decision_json_mid_loop_falls_back_without_crash(self):
+        def fake_bridge(args, payload):
+            if args == ["--list-tools"]:
+                return [
+                    {
+                        "name": "nmap",
+                        "version": "7.0",
+                        "description": "scan",
+                        "action_class": "SYSTEM",
+                        "args_schema": {"type": "object"},
+                    }
+                ]
+            return {
+                "ok": True,
+                "exit_code": 0,
+                "stdout": "scan output",
+                "stderr": "",
+                "duration_ms": 5,
+                "artifacts": [],
+                "command_preview": "nmap 192.168.7.3",
+            }
+
+        calls = {"decision": 0, "final": 0}
+
+        def fake_llm(prompt, schema_path, **kwargs):
+            if "assistant_decision.schema.json" in str(schema_path):
+                calls["decision"] += 1
+                if calls["decision"] == 1:
+                    return json.dumps(
+                        {
+                            "action": "tool",
+                            "tool_name": "nmap",
+                            "args": {"target": "192.168.7.3"},
+                            "action_class": "SYSTEM",
+                            "timeout_seconds": 3,
+                            "response": None,
+                        }
+                    )
+                return "{not valid json}"
+            calls["final"] += 1
+            return json.dumps({"response": "Final summary from fallback path."})
+
+        assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
+        result = assistant.handle_user_input("use nmap on 192.168.7.3")
+        self.assertIn("Final summary", result["response"])
+        self.assertIn("decision-error fallback", " | ".join(result.get("logs", [])))
+        self.assertEqual(calls["final"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

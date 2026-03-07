@@ -594,12 +594,37 @@ class AssistantCore:
             current_step = plan[step_index]
             current_step["status"] = "in_progress"
 
-            decision = self._decide(
-                user_input,
-                plan=plan,
-                current_step=current_step,
-                prior_tool_result=prior_tool_result,
-            )
+            try:
+                decision = self._decide(
+                    user_input,
+                    plan=plan,
+                    current_step=current_step,
+                    prior_tool_result=prior_tool_result,
+                )
+            except Exception as exc:
+                current_step["status"] = "completed"
+                current_step["note"] = f"Decision generation failed: {exc}"
+                logs.append(f"decision generation failed at step {step_index + 1}: {exc}")
+                if tool_history:
+                    response = self._finalize_response(
+                        user_input,
+                        last_tool_call,
+                        last_tool_result,
+                        plan=plan,
+                        trace=trace,
+                        tool_history=tool_history,
+                    )
+                else:
+                    response = f"Could not complete decision step due to model output error: {exc}"
+                return {
+                    "response": response,
+                    "decision": last_decision or {"action": "respond", "response": response},
+                    "tool_call": last_tool_call,
+                    "tool_result": last_tool_result,
+                    "logs": logs + [f"decision: respond (decision-error fallback at step {step_index + 1})"],
+                    "plan": plan,
+                    "trace": trace,
+                }
             decision, normalize_note = self._normalize_decision(decision)
             if normalize_note:
                 logs.append(normalize_note)
