@@ -24,6 +24,14 @@ class BridgeValidationError(ValueError):
     pass
 
 
+def _to_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 def _error_result(message: str, *, exit_code: int = 2) -> dict:
     return {
         "ok": False,
@@ -296,20 +304,20 @@ def _dispatch_tool(call: dict) -> dict:
             check=False,
         )
         exit_code = proc.returncode
-        stdout = proc.stdout
-        stderr = proc.stderr
+        stdout = _to_text(proc.stdout)
+        stderr = _to_text(proc.stderr)
     except subprocess.TimeoutExpired as exc:
         exit_code = -9
-        stdout = exc.stdout or ""
-        stderr = (exc.stderr or "") + f"\nTimed out after {timeout}s"
+        stdout = _to_text(exc.stdout)
+        stderr = _to_text(exc.stderr) + f"\nTimed out after {timeout}s"
     duration_ms = int((time.perf_counter() - started) * 1000)
 
     if checkpoint_hash and exit_code != 0:
         try:
             rollback(checkpoint_hash)
-            stderr = (stderr + "\nRollback applied.").strip()
+            stderr = (_to_text(stderr) + "\nRollback applied.").strip()
         except Exception as exc:
-            stderr = (stderr + f"\nRollback failed: {exc}").strip()
+            stderr = (_to_text(stderr) + f"\nRollback failed: {exc}").strip()
 
     return {
         "ok": exit_code == 0,

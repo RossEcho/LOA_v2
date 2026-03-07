@@ -87,6 +87,33 @@ class TestLoaBridge(unittest.TestCase):
         rollback_mock.assert_called_once_with("abc123")
         snapshot_mock.assert_called_once()
 
+    @patch("src.loa_bridge.rollback")
+    @patch("src.loa_bridge.snapshot", return_value="abc123")
+    @patch("src.loa_bridge.subprocess.run")
+    def test_dispatch_timeout_with_bytes_is_json_safe(self, run_mock, snapshot_mock, rollback_mock):
+        run_mock.side_effect = subprocess.TimeoutExpired(
+            cmd=["bash", "tools/ping/ping.sh", "8.8.8.8", "1"],
+            timeout=3,
+            output=b"partial-bytes",
+            stderr=b"stderr-bytes",
+        )
+        result = _dispatch_tool(
+            {
+                "tool_name": "ping",
+                "args": {"target": "8.8.8.8", "count": 1},
+                "cwd": None,
+                "timeout_seconds": 3,
+                "action_class": "NETWORK",
+                "env": None,
+            }
+        )
+        self.assertFalse(result["ok"])
+        self.assertIsInstance(result["stdout"], str)
+        self.assertIsInstance(result["stderr"], str)
+        self.assertIn("Timed out after 3s", result["stderr"])
+        rollback_mock.assert_called_once_with("abc123")
+        snapshot_mock.assert_called_once()
+
     @patch("src.loa_bridge.load_tool_spec", return_value={"options": {}})
     @patch("src.loa_bridge.load_registry", return_value={"tools": [{"name": "nmap", "version": "7.9", "path": "/usr/bin/nmap"}]})
     @patch("src.loa_bridge.rollback")
