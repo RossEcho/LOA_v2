@@ -515,6 +515,7 @@ class AssistantCore:
 
         parts = [f"Execution summary: {runs} tool step(s), {success} succeeded, {failed} failed."]
         if error is not None:
+            parts.append(f"Overall status: failed to complete final analysis.")
             parts.append(f"Final LLM summary timed out/failed: {error}.")
         if isinstance(tool_result, dict):
             stderr = str(tool_result.get("stderr") or "").strip()
