@@ -152,6 +152,31 @@ class AssistantCore:
             "command_preview": tool_result.get("command_preview"),
         }
 
+    def _is_generic_response(self, text: str | None) -> bool:
+        if not isinstance(text, str):
+            return True
+        normalized = text.strip().lower().rstrip(".!")
+        return normalized in {"completed", "done", "finished", "no response generated"}
+
+    def _has_security_scan_context(
+        self, tool_call: dict | list | None, tool_history: list[dict] | None
+    ) -> bool:
+        def _has_nmap_in_call(call) -> bool:
+            if isinstance(call, dict):
+                return str(call.get("tool_name", "")).lower() == "nmap"
+            if isinstance(call, list):
+                return any(_has_nmap_in_call(item) for item in call)
+            return False
+
+        if _has_nmap_in_call(tool_call):
+            return True
+        for entry in tool_history or []:
+            if not isinstance(entry, dict):
+                continue
+            if _has_nmap_in_call(entry.get("tool_call")):
+                return True
+        return False
+
     def _prompt_for_decision(
         self,
         user_input: str,
@@ -210,6 +235,7 @@ class AssistantCore:
         trace: list[dict] | None = None,
         tool_history: list[dict] | None = None,
     ) -> str:
+        security_scan = self._has_security_scan_context(tool_call, tool_history)
         envelope = {
             "task": "Write a concise user-facing response.",
             "requirements": [
@@ -217,6 +243,7 @@ class AssistantCore:
                 "Summarize what happened across all executed steps.",
                 "If any tool failed, explain the failure clearly.",
                 "If retries happened, mention that briefly and conclude.",
+                "If this is a security scan, present findings as a short pentest-style report: scope, key findings, and next actions.",
             ],
             "user_input": user_input,
             "tool_call": tool_call,
@@ -224,6 +251,7 @@ class AssistantCore:
             "plan": plan or [],
             "trace": trace or [],
             "tool_history": tool_history or [],
+            "security_scan_context": security_scan,
         }
         return json.dumps(envelope, ensure_ascii=False)
 
@@ -599,6 +627,16 @@ class AssistantCore:
                 response = decision.get("response")
                 if not isinstance(response, str):
                     response = "No response generated."
+                if self._is_generic_response(response) and tool_history:
+                    response = self._finalize_response(
+                        user_input,
+                        last_tool_call,
+                        last_tool_result,
+                        plan=plan,
+                        trace=trace,
+                        tool_history=tool_history,
+                    )
+                    logs.append("response refined from accumulated tool history")
                 return {
                     "response": response,
                     "decision": decision,

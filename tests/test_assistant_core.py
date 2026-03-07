@@ -431,6 +431,53 @@ class TestAssistantCore(unittest.TestCase):
         self.assertIn("Execution summary:", result["response"])
         self.assertIn("Final LLM summary timed out/failed", result["response"])
 
+    def test_generic_respond_after_tool_runs_is_refined_with_final_summary(self):
+        def fake_bridge(args, payload):
+            if args == ["--list-tools"]:
+                return [
+                    {
+                        "name": "nmap",
+                        "version": "7.0",
+                        "description": "scan",
+                        "action_class": "SYSTEM",
+                        "args_schema": {"type": "object"},
+                    }
+                ]
+            return {
+                "ok": True,
+                "exit_code": 0,
+                "stdout": "scan output",
+                "stderr": "",
+                "duration_ms": 5,
+                "artifacts": [],
+                "command_preview": "nmap 192.168.7.3",
+            }
+
+        calls = {"decision": 0, "final": 0}
+
+        def fake_llm(prompt, schema_path, **kwargs):
+            if "assistant_decision.schema.json" in str(schema_path):
+                calls["decision"] += 1
+                if calls["decision"] == 1:
+                    return json.dumps(
+                        {
+                            "action": "tool",
+                            "tool_name": "nmap",
+                            "args": {"target": "192.168.7.3"},
+                            "action_class": "SYSTEM",
+                            "timeout_seconds": 3,
+                            "response": None,
+                        }
+                    )
+                return json.dumps({"action": "respond", "response": "Completed.", "tool_name": None, "args": None, "action_class": None, "timeout_seconds": None})
+            calls["final"] += 1
+            return json.dumps({"response": "Pentest findings: host reachable; no critical open ports found in this run."})
+
+        assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
+        result = assistant.handle_user_input("use nmap on 192.168.7.3")
+        self.assertIn("Pentest findings:", result["response"])
+        self.assertEqual(calls["final"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
