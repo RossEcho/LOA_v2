@@ -357,7 +357,7 @@ class TestAssistantCore(unittest.TestCase):
             return {
                 "ok": False,
                 "exit_code": 1,
-                "stdout": "",
+                "stdout": "Nmap scan report for 192.168.7.3\nHost is up.\n80/tcp open http\n",
                 "stderr": "failed",
                 "duration_ms": 5,
                 "artifacts": [],
@@ -386,6 +386,8 @@ class TestAssistantCore(unittest.TestCase):
         assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
         result = assistant.handle_user_input("use nmap on 192.168.7.3")
         self.assertIn("Execution summary:", result["response"])
+        self.assertIn("Observations:", result["response"])
+        self.assertIn("Open ports detected:", result["response"])
         self.assertNotIn("failed to complete final analysis", result["response"])
         self.assertIn("repeat-loop guard", " | ".join(result.get("logs", [])))
         self.assertEqual(llm_calls["decision"], 2)

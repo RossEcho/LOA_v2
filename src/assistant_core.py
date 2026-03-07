@@ -541,11 +541,70 @@ class AssistantCore:
         if error is not None:
             parts.append(f"Overall status: failed to complete final analysis.")
             parts.append(f"Final LLM summary timed out/failed: {error}.")
-        if isinstance(tool_result, dict):
-            stderr = str(tool_result.get("stderr") or "").strip()
-            if stderr:
-                parts.append(f"Last error: {stderr}")
+        observations = self._derive_tool_observations(tool_history, tool_result)
+        if observations:
+            parts.append("Observations: " + " | ".join(observations))
         return " ".join(parts)
+
+    def _derive_tool_observations(
+        self,
+        tool_history: list[dict] | None,
+        tool_result: dict | list | None,
+    ) -> list[str]:
+        observations: list[str] = []
+        seen: set[str] = set()
+
+        def _add(obs: str) -> None:
+            text = obs.strip()
+            if not text or text in seen:
+                return
+            seen.add(text)
+            observations.append(text)
+
+        def _from_result(result: dict, tool_name: str | None = None) -> None:
+            stderr = str(result.get("stderr") or "").strip()
+            stdout = str(result.get("stdout") or "").strip()
+            stdout_tail = str(result.get("stdout_tail") or "").strip()
+            stderr_tail = str(result.get("stderr_tail") or "").strip()
+            combined = "\n".join([stdout, stdout_tail, stderr, stderr_tail]).strip()
+            preview = str(result.get("command_preview") or "").strip()
+            lower_preview = preview.lower()
+            lower_tool = (tool_name or "").lower()
+            is_nmap = " nmap" in f" {lower_preview}" or lower_tool == "nmap"
+
+            if is_nmap:
+                if re.search(r"\bhost is up\b", combined, flags=re.IGNORECASE):
+                    _add("Target host appears reachable.")
+                open_ports = re.findall(r"\b(\d+)/(tcp|udp)\s+open\s+([A-Za-z0-9._-]+)", combined, flags=re.IGNORECASE)
+                if open_ports:
+                    formatted = ", ".join([f"{p}/{proto} ({svc})" for p, proto, svc in open_ports[:8]])
+                    _add(f"Open ports detected: {formatted}.")
+                elif "0 open ports" in combined.lower():
+                    _add("No open ports reported.")
+                if re.search(r"\bservice detection performed\b", combined, flags=re.IGNORECASE):
+                    _add("Service detection was performed (-sV).")
+
+            if stderr:
+                _add(f"Last error: {stderr}")
+            elif stderr_tail:
+                _add(f"Last error: {stderr_tail}")
+
+            if not is_nmap and preview:
+                _add(f"Last command: {preview}")
+
+        for entry in tool_history or []:
+            if not isinstance(entry, dict):
+                continue
+            call = entry.get("tool_call")
+            tool_name = call.get("tool_name") if isinstance(call, dict) else None
+            result = entry.get("tool_result")
+            if isinstance(result, dict):
+                _from_result(result, tool_name=tool_name if isinstance(tool_name, str) else None)
+
+        if isinstance(tool_result, dict):
+            _from_result(tool_result)
+
+        return observations[:6]
 
     def _tool_exec_signature(self, tool_call: dict | list | None, tool_result: dict | list | None) -> str:
         if isinstance(tool_result, dict):
