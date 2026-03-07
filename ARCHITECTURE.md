@@ -2,7 +2,6 @@
 
 ## Step 0 Discovery Summary
 
-- OpenClaw reference code is present under `openclaw/`.
 - Relevant reference concepts extracted (not reused as runtime):
   - Tool registry/catalog pattern from `openclaw/src/gateway/server-methods/tools-catalog.ts`.
   - Reasoning -> action dispatch flow from `openclaw/src/gateway/server-methods/chat.ts`.
