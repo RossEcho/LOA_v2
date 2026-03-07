@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.orchestrator.llm import extract_json_object, run_llm_text
+from src.tool_onboarding import ToolOnboardingError, init_tool
 
 DECISION_SCHEMA_PATH = PROJECT_ROOT / "protocol" / "assistant_decision.schema.json"
 FINAL_SCHEMA_PATH = PROJECT_ROOT / "protocol" / "assistant_response.schema.json"
@@ -62,6 +63,36 @@ class AssistantCore:
         self._bridge_json = bridge_json_runner or _default_bridge_json
         self._llm_text = llm_text_runner or run_llm_text
         self.tools = self._load_tools()
+
+    def _try_onboard_from_input(self, user_input: str) -> dict | None:
+        if not isinstance(user_input, str):
+            return None
+        match = re.match(r"^\s*(?:add|init)\s+tool\s+([A-Za-z0-9._+-]+)\s*$", user_input, flags=re.IGNORECASE)
+        if not match:
+            return None
+
+        tool_name = match.group(1).strip()
+        try:
+            result = init_tool(tool_name)
+            self.tools = self._load_tools()
+        except ToolOnboardingError as exc:
+            return {
+                "response": f"Failed to add tool '{tool_name}': {exc}",
+                "decision": {"action": "tool_onboard", "tool_name": tool_name, "ok": False},
+                "tool_call": None,
+                "tool_result": {"ok": False, "error": str(exc)},
+                "logs": [f"tool onboarding failed: {tool_name}"],
+            }
+
+        processed = int(result.get("processed", 0))
+        skipped = int(result.get("skipped", 0))
+        return {
+            "response": f"Tool '{tool_name}' added. Processed {processed} help blocks, skipped {skipped}.",
+            "decision": {"action": "tool_onboard", "tool_name": tool_name, "ok": True},
+            "tool_call": None,
+            "tool_result": result,
+            "logs": [f"tool onboarding: {tool_name}", "tool list refreshed"],
+        }
 
     def _load_tools(self) -> list[dict]:
         payload = self._bridge_json(["--list-tools"], None)
@@ -271,6 +302,10 @@ class AssistantCore:
         return response
 
     def handle_user_input(self, user_input: str) -> dict:
+        onboarding_result = self._try_onboard_from_input(user_input)
+        if onboarding_result is not None:
+            return onboarding_result
+
         decision = self._decide(user_input)
         self._validate_decision(decision)
 

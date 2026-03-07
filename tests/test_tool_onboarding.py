@@ -1,6 +1,6 @@
-import tempfile
 import unittest
 from pathlib import Path
+import shutil
 from unittest.mock import patch
 
 from src import tool_onboarding
@@ -30,8 +30,11 @@ ADVANCED:
         self.assertEqual(key, "port<port>")
 
     def test_init_tool_writes_spec_and_cache(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        root = Path("tests") / ".tmp_tool_onboarding"
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True, exist_ok=True)
+        try:
             specs_dir = root / "specs"
             cache_dir = root / "cache"
             registry_path = root / "registry.json"
@@ -72,10 +75,17 @@ ADVANCED:
                 self.assertTrue(spec_path.exists())
                 self.assertTrue(cache_path.exists())
                 self.assertTrue(registry_path.exists())
+                registry = tool_onboarding._read_json(registry_path, {})
+                self.assertIn("tools", registry)
+                self.assertEqual(registry["tools"][0]["name"], "demo")
+                self.assertIn("description", registry["tools"][0])
+                self.assertIn("usage", registry["tools"][0])
 
                 cached_result = tool_onboarding.init_tool("demo")
                 self.assertTrue(cached_result["ok"])
                 self.assertEqual(cached_result["processed"], 0)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

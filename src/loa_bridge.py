@@ -106,9 +106,11 @@ def _list_tools() -> list[dict]:
             {
                 "name": name,
                 "version": entry.get("version", "unknown"),
-                "description": f"Onboarded CLI tool ({entry.get('path', 'unknown path')})",
+                "description": entry.get("description")
+                or f"Onboarded CLI tool ({entry.get('path', 'unknown path')})",
                 "action_class": "SYSTEM",
                 "args_schema": {"type": "object"},
+                "usage": entry.get("usage", f"{name} [options]"),
             }
         )
     return merged

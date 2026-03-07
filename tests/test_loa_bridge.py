@@ -17,6 +17,26 @@ class TestLoaBridge(unittest.TestCase):
         names = {tool["name"] for tool in tools}
         self.assertIn("python", names)
 
+    @patch(
+        "src.loa_bridge.load_registry",
+        return_value={
+            "tools": [
+                {
+                    "name": "python",
+                    "version": "3.12",
+                    "path": "/usr/bin/python",
+                    "description": "Python interpreter",
+                    "usage": "python [options] script.py",
+                }
+            ]
+        },
+    )
+    def test_list_tools_uses_registry_description_and_usage(self, _registry_mock):
+        tools = _list_tools()
+        python_tool = next(tool for tool in tools if tool["name"] == "python")
+        self.assertEqual(python_tool["description"], "Python interpreter")
+        self.assertEqual(python_tool["usage"], "python [options] script.py")
+
     @patch("src.loa_bridge.rollback")
     @patch("src.loa_bridge.snapshot", return_value="abc123")
     @patch("src.loa_bridge.subprocess.run")

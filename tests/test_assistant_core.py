@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 from src.assistant_core import AssistantCore
 
@@ -147,6 +148,33 @@ class TestAssistantCore(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0]["args"]["target"], "8.8.8.8")
         self.assertEqual(calls[1]["args"]["target"], "8.8.4.4")
+
+    @patch("src.assistant_core.init_tool", return_value={"ok": True, "processed": 3, "skipped": 1})
+    def test_add_tool_command_onboards_and_refreshes_tools(self, init_tool_mock):
+        calls = {"list_tools": 0}
+
+        def fake_bridge(args, payload):
+            if args == ["--list-tools"]:
+                calls["list_tools"] += 1
+                return [
+                    {
+                        "name": "ping",
+                        "version": "1.0.0",
+                        "description": "desc",
+                        "action_class": "NETWORK",
+                        "args_schema": {"type": "object"},
+                    }
+                ]
+            raise AssertionError("unexpected bridge call")
+
+        def fake_llm(prompt, schema_path, **kwargs):
+            raise AssertionError("LLM should not be called for add tool command")
+
+        assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
+        result = assistant.handle_user_input("add tool nmap")
+        self.assertIn("Tool 'nmap' added.", result["response"])
+        self.assertEqual(calls["list_tools"], 2)
+        init_tool_mock.assert_called_once_with("nmap")
 
 
 if __name__ == "__main__":

@@ -257,12 +257,61 @@ def _update_registry(tool: str, version: str, tool_path: str) -> None:
         if isinstance(item, dict) and item.get("name") == tool:
             item["version"] = version
             item["path"] = tool_path
+            item.setdefault("description", f"{tool} CLI tool")
+            item.setdefault("usage", f"{tool} [options]")
             updated = True
             break
     if not updated:
-        tools.append({"name": tool, "version": version, "path": tool_path})
+        tools.append(
+            {
+                "name": tool,
+                "version": version,
+                "path": tool_path,
+                "description": f"{tool} CLI tool",
+                "usage": f"{tool} [options]",
+            }
+        )
     payload["tools"] = tools
     _atomic_write_json(REGISTRY_PATH, payload)
+
+
+def _help_overview(tool: str, help_text: str) -> tuple[str, str]:
+    lines = [line.strip() for line in help_text.splitlines() if line.strip()]
+    usage_line = next((line for line in lines if line.lower().startswith("usage:")), "")
+    usage = usage_line if usage_line else f"{tool} [options]"
+
+    purpose = ""
+    for line in lines:
+        lowered = line.lower()
+        if lowered.startswith("usage:"):
+            continue
+        if re.match(r"^[\[(<\-]", line):
+            continue
+        if len(line) < 6:
+            continue
+        purpose = line
+        break
+    if not purpose:
+        purpose = f"{tool} CLI tool"
+    if len(purpose) > 160:
+        purpose = purpose[:157].rstrip() + "..."
+    return purpose, usage
+
+
+def _upsert_registry_metadata(tool: str, *, description: str, usage: str) -> None:
+    payload = _read_json(REGISTRY_PATH, {"tools": []})
+    if not isinstance(payload, dict):
+        payload = {"tools": []}
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        tools = []
+    for item in tools:
+        if isinstance(item, dict) and item.get("name") == tool:
+            item["description"] = description
+            item["usage"] = usage
+            payload["tools"] = tools
+            _atomic_write_json(REGISTRY_PATH, payload)
+            return
 
 
 def load_registry() -> dict:
@@ -285,6 +334,7 @@ def load_tool_spec(tool: str) -> dict:
 def init_tool(tool: str) -> dict:
     help_text, version, help_cmd, tool_path = capture_help(tool)
     help_hash = _sha256(help_text + version)
+    description, usage = _help_overview(tool, help_text)
 
     spec_path = SPECS_DIR / f"{tool}.json"
     cache_path = CACHE_DIR / f"{tool}.json"
@@ -298,6 +348,7 @@ def init_tool(tool: str) -> dict:
 
     if spec.get("help_hash") == help_hash:
         _update_registry(tool, version, tool_path)
+        _upsert_registry_metadata(tool, description=description, usage=usage)
         return {"ok": True, "processed": 0, "skipped": 0}
 
     options = spec.get("options")
@@ -344,4 +395,5 @@ def init_tool(tool: str) -> dict:
     _atomic_write_json(spec_path, spec)
     _atomic_write_json(cache_path, cache)
     _update_registry(tool, version, tool_path)
+    _upsert_registry_metadata(tool, description=description, usage=usage)
     return {"ok": True, "processed": processed, "skipped": skipped}
