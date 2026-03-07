@@ -231,10 +231,11 @@ def run_llm_text(
     temp: float,
     seed: int,
     log_dir: str | Path | None = None,
+    timeout_sec_override: int | None = None,
 ) -> str:
     schema = Path(schema_path).resolve()
     backend = os.getenv("LOA_LLM_BACKEND", "server").strip().lower()
-    timeout_sec = int(os.getenv("LOA_LLM_TIMEOUT_SEC", "90"))
+    timeout_sec = timeout_sec_override if timeout_sec_override is not None else int(os.getenv("LOA_LLM_TIMEOUT_SEC", "90"))
     resolved_log_dir = Path(log_dir).resolve() if log_dir else None
 
     if backend == "server":
@@ -270,6 +271,7 @@ def run_llm_json(
     temp: float,
     seed: int,
     log_dir: str | Path | None = None,
+    timeout_sec_override: int | None = None,
 ) -> dict:
     text = run_llm_text(
         prompt,
@@ -279,5 +281,6 @@ def run_llm_json(
         temp=temp,
         seed=seed,
         log_dir=log_dir,
+        timeout_sec_override=timeout_sec_override,
     )
     return extract_json_object(text)

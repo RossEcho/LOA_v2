@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -20,6 +21,9 @@ FINAL_SCHEMA_PATH = PROJECT_ROOT / "protocol" / "assistant_response.schema.json"
 DEFAULT_BRIDGE_PATH = PROJECT_ROOT / "bin" / "loa-bridge"
 ACTION_CLASSES = {"READ", "WRITE", "NETWORK", "SYSTEM"}
 MAX_DECISION_STEPS = int(os.getenv("LOA_ASSISTANT_MAX_STEPS", "10"))
+DECISION_TIMEOUT_SEC = int(os.getenv("LOA_ASSISTANT_DECISION_TIMEOUT_SEC", "25"))
+FINAL_TIMEOUT_SEC = int(os.getenv("LOA_ASSISTANT_FINAL_TIMEOUT_SEC", "25"))
+STREAM_PROGRESS = os.getenv("LOA_ASSISTANT_STREAM_PROGRESS", "1") == "1" and sys.stdout.isatty()
 
 
 class AssistantError(RuntimeError):
@@ -79,6 +83,10 @@ class AssistantCore:
         if not match:
             return None
         return match.group(1).strip()
+
+    def _progress(self, message: str) -> None:
+        if STREAM_PROGRESS:
+            print(f"progress> {message}", flush=True)
 
     def _try_onboard_from_input(self, user_input: str) -> dict | None:
         tool_name = self._extract_tool_onboarding_request(user_input)
@@ -211,6 +219,8 @@ class AssistantCore:
         current_step: dict | None = None,
         prior_tool_result: dict | list | None = None,
     ) -> dict:
+        started = time.perf_counter()
+        self._progress(f"llm decision start (timeout={DECISION_TIMEOUT_SEC}s)")
         text = self._llm_text(
             self._prompt_for_decision(
                 user_input,
@@ -224,7 +234,10 @@ class AssistantCore:
             temp=self.temp,
             seed=self.seed,
             log_dir=None,
+            timeout_sec_override=DECISION_TIMEOUT_SEC,
         )
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        self._progress(f"llm decision done ({elapsed_ms} ms)")
         decision = extract_json_object(text)
         if not isinstance(decision, dict):
             raise AssistantError("decision must be a JSON object")
@@ -334,7 +347,11 @@ class AssistantCore:
             "action_class": decision["action_class"],
             "env": None,
         }
+        self._progress(f"tool start: {call['tool_name']}")
+        started = time.perf_counter()
         result = self._bridge_json([], call)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        self._progress(f"tool done: {call['tool_name']} ({elapsed_ms} ms)")
         if not isinstance(result, dict):
             raise AssistantError("bridge call result must be a JSON object")
         return {"call": call, "result": result}
@@ -360,6 +377,8 @@ class AssistantCore:
         return prefix + "\n" + "\n".join(details)
 
     def _finalize_response(self, user_input: str, tool_call: dict, tool_result: dict) -> str:
+        started = time.perf_counter()
+        self._progress(f"llm final response start (timeout={FINAL_TIMEOUT_SEC}s)")
         text = self._llm_text(
             self._prompt_for_final_response(user_input, tool_call, tool_result),
             FINAL_SCHEMA_PATH,
@@ -368,7 +387,10 @@ class AssistantCore:
             temp=self.temp,
             seed=self.seed,
             log_dir=None,
+            timeout_sec_override=FINAL_TIMEOUT_SEC,
         )
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        self._progress(f"llm final response done ({elapsed_ms} ms)")
         payload = extract_json_object(text)
         response = payload.get("response")
         if not isinstance(response, str):
@@ -393,6 +415,7 @@ class AssistantCore:
         last_decision: dict | None = None
 
         for step_index in range(MAX_DECISION_STEPS):
+            self._progress(f"step {step_index + 1}/{MAX_DECISION_STEPS} start")
             if step_index >= len(plan):
                 plan.append({"step": f"Follow-up step {step_index + 1}", "status": "pending", "note": ""})
             current_step = plan[step_index]
