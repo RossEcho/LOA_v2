@@ -430,6 +430,7 @@ class TestAssistantCore(unittest.TestCase):
         result = assistant.handle_user_input("use nmap on 192.168.7.3")
         self.assertIn("Execution summary:", result["response"])
         self.assertIn("Final LLM summary timed out/failed", result["response"])
+        self.assertIn("0 succeeded, 2 failed", result["response"])
 
     def test_generic_respond_after_tool_runs_is_refined_with_final_summary(self):
         def fake_bridge(args, payload):

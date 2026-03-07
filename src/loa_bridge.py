@@ -166,6 +166,14 @@ def _build_onboarded_argv(tool_name: str, tool_path: str, spec: dict, args: dict
     positional_keys = {"target", "targets", "host", "hosts", "ip", "address", "destination"}
     scan_type_keys = {"scan_type", "scan", "mode", "type"}
     scan_type_ignored_values = {"host", "basic", "default"}
+    nmap_scan_type_flag = {
+        "ping": "-sn",
+        "ping_scan": "-sn",
+        "service": "-sV",
+        "service_scan": "-sV",
+        "syn": "-sS",
+        "syn_scan": "-sS",
+    }
 
     def _append_positional(value) -> None:
         if value is None:
@@ -200,6 +208,12 @@ def _build_onboarded_argv(tool_name: str, tool_path: str, spec: dict, args: dict
 
         key_known = _has_option_key(spec, key)
         if not key_known:
+            if tool_name.lower() == "nmap" and key in scan_type_keys:
+                normalized = str(value).strip().lower()
+                mapped_flag = nmap_scan_type_flag.get(normalized)
+                if mapped_flag:
+                    argv.append(mapped_flag)
+                    continue
             if key in scan_type_keys and str(value).strip().lower() in scan_type_ignored_values:
                 continue
             _append_positional(value)

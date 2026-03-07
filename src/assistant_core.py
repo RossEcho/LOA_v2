@@ -482,6 +482,16 @@ class AssistantCore:
         tool_result: dict | list | None = None,
         error: Exception | None = None,
     ) -> str:
+        failure_markers = ("failed", "error", "timed out", "unrecognized", "unable", "resolve")
+
+        def _result_failed(result: dict | None) -> bool:
+            if not isinstance(result, dict):
+                return True
+            if not result.get("ok"):
+                return True
+            stderr = str(result.get("stderr") or "").strip().lower()
+            return bool(stderr) and any(marker in stderr for marker in failure_markers)
+
         runs = len(tool_history or [])
         success = 0
         failed = 0
@@ -491,16 +501,16 @@ class AssistantCore:
                 continue
             result = entry.get("tool_result")
             if isinstance(result, dict):
-                if result.get("ok"):
-                    success += 1
-                else:
+                if _result_failed(result):
                     failed += 1
+                else:
+                    success += 1
 
         if isinstance(tool_result, dict) and runs == 0:
-            if tool_result.get("ok"):
-                success = 1
-            else:
+            if _result_failed(tool_result):
                 failed = 1
+            else:
+                success = 1
             runs = 1
 
         parts = [f"Execution summary: {runs} tool step(s), {success} succeeded, {failed} failed."]
