@@ -314,6 +314,34 @@ class TestAssistantCore(unittest.TestCase):
         result = assistant.handle_user_input("hi")
         self.assertEqual(result["response"], "completed")
 
+    def test_nested_decision_packet_is_normalized(self):
+        def fake_bridge(args, payload):
+            if args == ["--list-tools"]:
+                return [
+                    {
+                        "name": "ping",
+                        "version": "1.0.0",
+                        "description": "desc",
+                        "action_class": "NETWORK",
+                        "args_schema": {"type": "object"},
+                    }
+                ]
+            return {
+                "ok": True,
+                "exit_code": 0,
+                "stdout": "ok",
+                "stderr": "",
+                "duration_ms": 5,
+                "artifacts": [],
+            }
+
+        def fake_llm(prompt, schema_path, **kwargs):
+            return json.dumps({"decision": {"action": "finish", "reason": "all done"}})
+
+        assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
+        result = assistant.handle_user_input("hi")
+        self.assertEqual(result["response"], "all done")
+
 
 if __name__ == "__main__":
     unittest.main()

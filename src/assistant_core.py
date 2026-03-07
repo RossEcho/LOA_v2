@@ -266,13 +266,24 @@ class AssistantCore:
     def _normalize_decision(self, decision: dict) -> tuple[dict, str | None]:
         if not isinstance(decision, dict):
             return decision, None
+        notes: list[str] = []
+        nested = decision.get("decision")
+        if isinstance(nested, dict):
+            merged = dict(nested)
+            if "response" in decision and "response" not in merged:
+                merged["response"] = decision.get("response")
+            if "reason" in decision and "reason" not in merged:
+                merged["reason"] = decision.get("reason")
+            decision = merged
+            notes.append("normalized nested decision packet")
         action = decision.get("action")
         if action in {"respond", "tool"}:
-            return decision, None
+            return decision, "; ".join(notes) if notes else None
 
         if action in {"continue", "run_tool"}:
             decision["action"] = "tool"
-            return decision, f"normalized decision.action from '{action}' to 'tool'"
+            notes.append(f"normalized decision.action from '{action}' to 'tool'")
+            return decision, "; ".join(notes)
 
         if action in {"stop", "finish"}:
             response = decision.get("response")
@@ -284,15 +295,28 @@ class AssistantCore:
                     response = "Done."
                 decision["response"] = response
             decision["action"] = "respond"
-            return decision, f"normalized decision.action from '{action}' to 'respond'"
+            notes.append(f"normalized decision.action from '{action}' to 'respond'")
+            return decision, "; ".join(notes)
 
         # Unknown action but usable response exists -> degrade safely to respond.
         response = decision.get("response")
         if isinstance(response, str) and response.strip():
             decision["action"] = "respond"
-            return decision, f"normalized invalid decision.action '{action}' to 'respond'"
+            notes.append(f"normalized invalid decision.action '{action}' to 'respond'")
+            return decision, "; ".join(notes)
 
-        return decision, None
+        reason = decision.get("reason")
+        if isinstance(reason, dict):
+            try:
+                reason = json.dumps(reason, ensure_ascii=False)
+            except Exception:
+                reason = str(reason)
+        if not isinstance(reason, str) or not reason.strip():
+            reason = "Completed."
+        decision["response"] = reason
+        decision["action"] = "respond"
+        notes.append(f"normalized invalid decision.action '{action}' to fallback 'respond'")
+        return decision, "; ".join(notes)
 
     def _is_ping_request(self, user_input: str) -> bool:
         return isinstance(user_input, str) and "ping" in user_input.lower()
