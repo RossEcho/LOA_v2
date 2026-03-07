@@ -390,6 +390,47 @@ class TestAssistantCore(unittest.TestCase):
         self.assertEqual(llm_calls["decision"], 2)
         self.assertEqual(llm_calls["final"], 1)
 
+    def test_final_summary_timeout_falls_back_to_deterministic_summary(self):
+        def fake_bridge(args, payload):
+            if args == ["--list-tools"]:
+                return [
+                    {
+                        "name": "nmap",
+                        "version": "7.0",
+                        "description": "scan",
+                        "action_class": "SYSTEM",
+                        "args_schema": {"type": "object"},
+                    }
+                ]
+            return {
+                "ok": False,
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": "scan failed",
+                "duration_ms": 5,
+                "artifacts": [],
+                "command_preview": "nmap 192.168.7.3",
+            }
+
+        def fake_llm(prompt, schema_path, **kwargs):
+            if "assistant_decision.schema.json" in str(schema_path):
+                return json.dumps(
+                    {
+                        "action": "tool",
+                        "tool_name": "nmap",
+                        "args": {"target": "192.168.7.3"},
+                        "action_class": "SYSTEM",
+                        "timeout_seconds": 3,
+                        "response": None,
+                    }
+                )
+            raise TimeoutError("timed out")
+
+        assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
+        result = assistant.handle_user_input("use nmap on 192.168.7.3")
+        self.assertIn("Execution summary:", result["response"])
+        self.assertIn("Final LLM summary timed out/failed", result["response"])
+
 
 if __name__ == "__main__":
     unittest.main()

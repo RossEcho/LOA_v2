@@ -136,7 +136,7 @@ def _run_server(prompt: str, schema_path: Path, timeout_sec: int, temp: float, s
     try:
         with urllib.request.urlopen(request, timeout=timeout_sec) as response:
             body = response.read().decode("utf-8", errors="replace")
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise LLMError(f"llm server request failed: {exc}") from exc
 
     try:

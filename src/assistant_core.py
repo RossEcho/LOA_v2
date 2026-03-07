@@ -447,6 +447,43 @@ class AssistantCore:
             prefix += " Target list was truncated to keep execution bounded."
         return prefix + "\n" + "\n".join(details)
 
+    def _fallback_final_response(
+        self,
+        *,
+        tool_history: list[dict] | None = None,
+        tool_result: dict | list | None = None,
+        error: Exception | None = None,
+    ) -> str:
+        runs = len(tool_history or [])
+        success = 0
+        failed = 0
+
+        for entry in tool_history or []:
+            if not isinstance(entry, dict):
+                continue
+            result = entry.get("tool_result")
+            if isinstance(result, dict):
+                if result.get("ok"):
+                    success += 1
+                else:
+                    failed += 1
+
+        if isinstance(tool_result, dict) and runs == 0:
+            if tool_result.get("ok"):
+                success = 1
+            else:
+                failed = 1
+            runs = 1
+
+        parts = [f"Execution summary: {runs} tool step(s), {success} succeeded, {failed} failed."]
+        if error is not None:
+            parts.append(f"Final LLM summary timed out/failed: {error}.")
+        if isinstance(tool_result, dict):
+            stderr = str(tool_result.get("stderr") or "").strip()
+            if stderr:
+                parts.append(f"Last error: {stderr}")
+        return " ".join(parts)
+
     def _finalize_response(
         self,
         user_input: str,
@@ -459,30 +496,38 @@ class AssistantCore:
     ) -> str:
         started = time.perf_counter()
         self._progress(f"llm final response start (timeout={FINAL_TIMEOUT_SEC}s)")
-        text = self._llm_text(
-            self._prompt_for_final_response(
-                user_input,
-                tool_call,
-                tool_result,
-                plan=plan,
-                trace=trace,
+        try:
+            text = self._llm_text(
+                self._prompt_for_final_response(
+                    user_input,
+                    tool_call,
+                    tool_result,
+                    plan=plan,
+                    trace=trace,
+                    tool_history=tool_history,
+                ),
+                FINAL_SCHEMA_PATH,
+                model_path=self.model_path,
+                n_ctx=self.n_ctx,
+                temp=self.temp,
+                seed=self.seed,
+                log_dir=None,
+                timeout_sec_override=FINAL_TIMEOUT_SEC,
+            )
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            self._progress(f"llm final response done ({elapsed_ms} ms)")
+            payload = extract_json_object(text)
+            response = payload.get("response")
+            if not isinstance(response, str):
+                raise AssistantError("final response payload missing response")
+            return response
+        except Exception as exc:
+            self._progress(f"llm final response failed: {exc}")
+            return self._fallback_final_response(
                 tool_history=tool_history,
-            ),
-            FINAL_SCHEMA_PATH,
-            model_path=self.model_path,
-            n_ctx=self.n_ctx,
-            temp=self.temp,
-            seed=self.seed,
-            log_dir=None,
-            timeout_sec_override=FINAL_TIMEOUT_SEC,
-        )
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        self._progress(f"llm final response done ({elapsed_ms} ms)")
-        payload = extract_json_object(text)
-        response = payload.get("response")
-        if not isinstance(response, str):
-            raise AssistantError("final response payload missing response")
-        return response
+                tool_result=tool_result,
+                error=exc,
+            )
 
     def handle_user_input(self, user_input: str) -> dict:
         onboarding_result = self._try_onboard_from_input(user_input)
