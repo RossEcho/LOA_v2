@@ -150,12 +150,41 @@ def _resolve_flag(spec: dict, arg_key: str) -> str:
     return f"--{arg_key.replace('_', '-')}"
 
 
+def _has_option_key(spec: dict, arg_key: str) -> bool:
+    options = spec.get("options")
+    if not isinstance(options, dict):
+        return False
+    wanted = _norm_option_key(arg_key)
+    if isinstance(options.get(arg_key), dict):
+        return True
+    return any(_norm_option_key(key) == wanted for key in options.keys())
+
+
 def _build_onboarded_argv(tool_name: str, tool_path: str, spec: dict, args: dict) -> list[str]:
     argv: list[str] = [tool_path or tool_name]
-    positional = args.get("_positional", [])
+    positional = list(args.get("_positional", [])) if isinstance(args.get("_positional"), list) else []
+    positional_keys = {"target", "targets", "host", "hosts", "ip", "address", "destination"}
     for key, value in args.items():
         if key == "_positional":
             continue
+        if key in positional_keys:
+            if isinstance(value, list):
+                positional.extend(str(item) for item in value)
+            elif value is not None:
+                positional.append(str(value))
+            continue
+
+        key_known = _has_option_key(spec, key)
+        if not key_known:
+            if isinstance(value, list):
+                positional.extend(str(item) for item in value)
+            elif isinstance(value, bool):
+                if value:
+                    positional.append(key)
+            elif value is not None:
+                positional.append(str(value))
+            continue
+
         flag = _resolve_flag(spec, key)
         if isinstance(value, bool):
             if value:

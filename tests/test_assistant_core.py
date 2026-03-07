@@ -42,13 +42,14 @@ class TestAssistantCore(unittest.TestCase):
                         "response": None,
                     }
                 )
-            return json.dumps({"response": "Ping completed."})
+            return json.dumps({"action": "respond", "response": "Ping completed.", "tool_name": None, "args": None, "action_class": None, "timeout_seconds": None})
 
         assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
         result = assistant.handle_user_input("ping 8.8.8.8")
         self.assertEqual(result["response"], "Ping completed.")
-        self.assertEqual(result["tool_call"]["tool_name"], "ping")
-        self.assertTrue(result["tool_result"]["ok"])
+        self.assertEqual(len(result["tool_call"]), 1)
+        self.assertEqual(result["tool_call"][0]["tool_name"], "ping")
+        self.assertTrue(result["tool_result"][0]["ok"])
 
     def test_direct_response(self):
         def fake_bridge(args, payload):
@@ -70,8 +71,9 @@ class TestAssistantCore(unittest.TestCase):
         self.assertEqual(result["response"], "Hello")
         self.assertIsNone(result["tool_call"])
 
-    def test_ping_range_overrides_respond_and_runs_batch(self):
+    def test_ping_range_runs_batch_after_tool_decision(self):
         calls: list[dict] = []
+        llm_calls = {"count": 0}
 
         def fake_bridge(args, payload):
             if args == ["--list-tools"]:
@@ -95,19 +97,30 @@ class TestAssistantCore(unittest.TestCase):
             }
 
         def fake_llm(prompt, schema_path, **kwargs):
-            return json.dumps(
-                {"action": "respond", "response": "cannot", "tool_name": None, "args": None, "action_class": None, "timeout_seconds": None}
-            )
+            llm_calls["count"] += 1
+            if llm_calls["count"] == 1:
+                return json.dumps(
+                    {
+                        "action": "tool",
+                        "tool_name": "ping",
+                        "args": {},
+                        "action_class": "NETWORK",
+                        "timeout_seconds": 3,
+                        "response": None,
+                    }
+                )
+            return json.dumps({"action": "respond", "response": "done", "tool_name": None, "args": None, "action_class": None, "timeout_seconds": None})
 
         assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
         result = assistant.handle_user_input("ping in the range of 192.168.7.2 - 40")
-        self.assertIn("Ping summary", result["response"])
+        self.assertEqual(result["response"], "done")
         self.assertEqual(len(calls), 16)
         self.assertEqual(calls[0]["args"]["target"], "192.168.7.2")
         self.assertEqual(calls[-1]["args"]["target"], "192.168.7.17")
 
     def test_ping_multiple_targets_runs_batch(self):
         calls: list[dict] = []
+        llm_calls = {"count": 0}
 
         def fake_bridge(args, payload):
             if args == ["--list-tools"]:
@@ -131,20 +144,23 @@ class TestAssistantCore(unittest.TestCase):
             }
 
         def fake_llm(prompt, schema_path, **kwargs):
-            return json.dumps(
-                {
-                    "action": "tool",
-                    "tool_name": "ping",
-                    "args": {},
-                    "action_class": "NETWORK",
-                    "timeout_seconds": 3,
-                    "response": None,
-                }
-            )
+            llm_calls["count"] += 1
+            if llm_calls["count"] == 1:
+                return json.dumps(
+                    {
+                        "action": "tool",
+                        "tool_name": "ping",
+                        "args": {},
+                        "action_class": "NETWORK",
+                        "timeout_seconds": 3,
+                        "response": None,
+                    }
+                )
+            return json.dumps({"action": "respond", "response": "done", "tool_name": None, "args": None, "action_class": None, "timeout_seconds": None})
 
         assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
         result = assistant.handle_user_input("ping 8.8.8.8 and 8.8.4.4")
-        self.assertIn("Ping summary", result["response"])
+        self.assertEqual(result["response"], "done")
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0]["args"]["target"], "8.8.8.8")
         self.assertEqual(calls[1]["args"]["target"], "8.8.4.4")
@@ -202,6 +218,8 @@ class TestAssistantCore(unittest.TestCase):
 
     @patch("src.assistant_core.init_tool", return_value={"ok": True, "processed": 1, "skipped": 0})
     def test_unknown_tool_decision_auto_onboards(self, init_tool_mock):
+        llm_calls = {"count": 0}
+
         def fake_bridge(args, payload):
             if args == ["--list-tools"]:
                 # First load only ping, second load includes nmap after onboarding.
@@ -245,6 +263,11 @@ class TestAssistantCore(unittest.TestCase):
 
         def fake_llm(prompt, schema_path, **kwargs):
             if "assistant_decision.schema.json" in str(schema_path):
+                llm_calls["count"] += 1
+                if llm_calls["count"] > 1:
+                    return json.dumps(
+                        {"action": "respond", "response": "Scan complete.", "tool_name": None, "args": None, "action_class": None, "timeout_seconds": None}
+                    )
                 return json.dumps(
                     {
                         "action": "tool",

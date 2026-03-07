@@ -9,10 +9,38 @@ from src.loa import main as loa_main
 from src.tool_onboarding import ToolOnboardingError, init_tool, load_registry, load_tool_spec
 
 
+def _print_trace(result: dict) -> None:
+    trace = result.get("trace")
+    if isinstance(trace, list) and trace:
+        print("trace>")
+        for item in trace:
+            if not isinstance(item, dict):
+                continue
+            step_idx = item.get("step_index", "?")
+            step_name = item.get("step", "")
+            action = item.get("decision_action", "")
+            tool = item.get("tool_name")
+            tool_text = f" tool={tool}" if isinstance(tool, str) and tool else ""
+            print(f"trace> step {step_idx}: {step_name} | action={action}{tool_text}")
+
+    plan = result.get("plan")
+    if isinstance(plan, list) and plan:
+        print("plan>")
+        for idx, item in enumerate(plan, start=1):
+            if not isinstance(item, dict):
+                continue
+            step = item.get("step", "")
+            status = item.get("status", "")
+            note = item.get("note", "")
+            suffix = f" | note={note}" if isinstance(note, str) and note else ""
+            print(f"plan> {idx}. [{status}] {step}{suffix}")
+
+
 def _run_once(assistant: AssistantCore, message: str) -> int:
     result = assistant.handle_user_input(message)
     for line in result.get("logs", []) or []:
         print(f"log> {line}")
+    _print_trace(result)
     print(result["response"])
     return 0
 
@@ -30,18 +58,18 @@ def _run_repl(assistant: AssistantCore) -> int:
         result = assistant.handle_user_input(message)
         for line in result.get("logs", []) or []:
             print(f"log> {line}")
+        _print_trace(result)
         print(f"assistant> {result['response']}")
 
 
 def _run_assistant(args: argparse.Namespace) -> int:
     assistant = AssistantCore()
     if args.once:
-        result = assistant.handle_user_input(args.once)
         if args.json:
+            result = assistant.handle_user_input(args.once)
             print(json.dumps(result, ensure_ascii=False, indent=2))
-        else:
-            print(result["response"])
-        return 0
+            return 0
+        return _run_once(assistant, args.once)
     return _run_repl(assistant)
 
 

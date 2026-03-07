@@ -19,6 +19,7 @@ DECISION_SCHEMA_PATH = PROJECT_ROOT / "protocol" / "assistant_decision.schema.js
 FINAL_SCHEMA_PATH = PROJECT_ROOT / "protocol" / "assistant_response.schema.json"
 DEFAULT_BRIDGE_PATH = PROJECT_ROOT / "bin" / "loa-bridge"
 ACTION_CLASSES = {"READ", "WRITE", "NETWORK", "SYSTEM"}
+MAX_DECISION_STEPS = int(os.getenv("LOA_ASSISTANT_MAX_STEPS", "10"))
 
 
 class AssistantError(RuntimeError):
@@ -124,7 +125,44 @@ class AssistantCore:
                 raise AssistantError(f"tool {item.get('name')} has invalid action_class")
         return payload
 
-    def _prompt_for_decision(self, user_input: str) -> str:
+    def _compact_tool_result(self, tool_result: dict | list | None) -> dict | list | None:
+        if isinstance(tool_result, list):
+            compact: list[dict] = []
+            for item in tool_result[:8]:
+                if isinstance(item, dict):
+                    compact.append(self._compact_tool_result(item))  # type: ignore[arg-type]
+            return compact
+        if not isinstance(tool_result, dict):
+            return tool_result
+        return {
+            "ok": tool_result.get("ok"),
+            "exit_code": tool_result.get("exit_code"),
+            "duration_ms": tool_result.get("duration_ms"),
+            "stdout_tail": str(tool_result.get("stdout", ""))[-600:],
+            "stderr_tail": str(tool_result.get("stderr", ""))[-600:],
+            "command_preview": tool_result.get("command_preview"),
+        }
+
+    def _prompt_for_decision(
+        self,
+        user_input: str,
+        *,
+        plan: list[dict] | None = None,
+        current_step: dict | None = None,
+        prior_tool_result: dict | list | None = None,
+    ) -> str:
+        tool_context: list[dict] = []
+        for tool in self.tools:
+            if not isinstance(tool, dict):
+                continue
+            tool_context.append(
+                {
+                    "name": tool.get("name"),
+                    "action_class": tool.get("action_class"),
+                    "description": tool.get("description"),
+                    "usage": tool.get("usage"),
+                }
+            )
         envelope = {
             "task": "Choose whether to reply directly or call one tool.",
             "requirements": [
@@ -132,9 +170,14 @@ class AssistantCore:
                 "If a tool is required, set action='tool' and provide tool_name, args, action_class.",
                 "If no tool is required, set action='respond' and provide response.",
                 "Never invent tool names. Use only tools listed below.",
+                "Use the current step and prior tool result (if provided) to choose the next action.",
+                "If all needed work is done, return action='respond'.",
             ],
-            "tools": self.tools,
+            "tools": tool_context,
             "user_input": user_input,
+            "plan": plan or [],
+            "current_step": current_step or {},
+            "prior_tool_result": self._compact_tool_result(prior_tool_result),
             "output_schema": {
                 "action": "respond|tool",
                 "response": "string|null",
@@ -160,9 +203,21 @@ class AssistantCore:
         }
         return json.dumps(envelope, ensure_ascii=False)
 
-    def _decide(self, user_input: str) -> dict:
+    def _decide(
+        self,
+        user_input: str,
+        *,
+        plan: list[dict] | None = None,
+        current_step: dict | None = None,
+        prior_tool_result: dict | list | None = None,
+    ) -> dict:
         text = self._llm_text(
-            self._prompt_for_decision(user_input),
+            self._prompt_for_decision(
+                user_input,
+                plan=plan,
+                current_step=current_step,
+                prior_tool_result=prior_tool_result,
+            ),
             DECISION_SCHEMA_PATH,
             model_path=self.model_path,
             n_ctx=self.n_ctx,
@@ -325,81 +380,129 @@ class AssistantCore:
         if onboarding_result is not None:
             return onboarding_result
 
-        decision = self._decide(user_input)
-        try:
-            self._validate_decision(decision)
-        except AssistantError as exc:
-            unknown_prefix = "unknown tool in decision: "
-            if isinstance(decision, dict) and str(exc).startswith(unknown_prefix):
-                tool_name = str(decision.get("tool_name", "")).strip()
-                if tool_name:
-                    try:
-                        self._onboard_tool(tool_name)
-                        self._validate_decision(decision)
-                    except ToolOnboardingError as onboarding_exc:
-                        raise AssistantError(f"unknown tool in decision: {tool_name} (auto-onboard failed: {onboarding_exc})") from onboarding_exc
+        plan: list[dict] = [
+            {"step": "Decide next action from user request", "status": "pending", "note": ""},
+            {"step": "Execute selected tool and analyze output", "status": "pending", "note": ""},
+            {"step": "Conclude or add follow-up step", "status": "pending", "note": ""},
+        ]
+        logs: list[str] = []
+        trace: list[dict] = []
+        prior_tool_result: dict | list | None = None
+        last_tool_call: dict | list | None = None
+        last_tool_result: dict | list | None = None
+        last_decision: dict | None = None
+
+        for step_index in range(MAX_DECISION_STEPS):
+            if step_index >= len(plan):
+                plan.append({"step": f"Follow-up step {step_index + 1}", "status": "pending", "note": ""})
+            current_step = plan[step_index]
+            current_step["status"] = "in_progress"
+
+            decision = self._decide(
+                user_input,
+                plan=plan,
+                current_step=current_step,
+                prior_tool_result=prior_tool_result,
+            )
+            trace_item = {
+                "step_index": step_index + 1,
+                "step": current_step.get("step", ""),
+                "decision_action": decision.get("action"),
+                "tool_name": decision.get("tool_name"),
+            }
+            trace.append(trace_item)
+            last_decision = decision
+            try:
+                self._validate_decision(decision)
+            except AssistantError as exc:
+                unknown_prefix = "unknown tool in decision: "
+                if isinstance(decision, dict) and str(exc).startswith(unknown_prefix):
+                    tool_name = str(decision.get("tool_name", "")).strip()
+                    if tool_name:
+                        try:
+                            self._onboard_tool(tool_name)
+                            self._validate_decision(decision)
+                            logs.append(f"auto-onboarded tool: {tool_name}")
+                        except ToolOnboardingError as onboarding_exc:
+                            raise AssistantError(
+                                f"unknown tool in decision: {tool_name} (auto-onboard failed: {onboarding_exc})"
+                            ) from onboarding_exc
+                    else:
+                        raise
                 else:
                     raise
-            else:
-                raise
 
-        if self._is_ping_request(user_input):
-            ping_decisions: list[dict] = []
-            truncated = False
-            if decision.get("action") == "respond":
-                ping_decisions, truncated = self._ping_decisions_from_input(user_input)
-            elif decision.get("action") == "tool" and decision.get("tool_name") == "ping":
-                ping_decisions, truncated = self._ping_decisions_from_input(user_input, decision)
-
-            if ping_decisions:
-                if len(ping_decisions) == 1:
-                    tool_exec = self._run_tool(ping_decisions[0])
-                    response = self._finalize_response(user_input, tool_exec["call"], tool_exec["result"])
-                    logs = [f"decision override: tool=ping targets=1"]
-                    preview = tool_exec["result"].get("command_preview")
-                    if isinstance(preview, str) and preview.strip():
-                        logs.append(f"command: {preview}")
-                    return {
-                        "response": response,
-                        "decision": ping_decisions[0],
-                        "tool_call": tool_exec["call"],
-                        "tool_result": tool_exec["result"],
-                        "logs": logs,
-                    }
-
-                tool_execs = [self._run_tool(ping_decision) for ping_decision in ping_decisions]
-                logs = [f"decision override: tool=ping targets={len(tool_execs)}"]
-                for item in tool_execs:
-                    preview = item["result"].get("command_preview")
-                    if isinstance(preview, str) and preview.strip():
-                        logs.append(f"command: {preview}")
+            if decision["action"] == "respond":
+                current_step["status"] = "completed"
+                current_step["note"] = "LLM chose to respond."
+                response = decision.get("response")
+                if not isinstance(response, str):
+                    response = "No response generated."
                 return {
-                    "response": self._summarize_batch_ping(tool_execs, truncated=truncated),
-                    "decision": {"action": "tool_batch", "tool_name": "ping", "count": len(tool_execs)},
-                    "tool_call": [item["call"] for item in tool_execs],
-                    "tool_result": [item["result"] for item in tool_execs],
-                    "logs": logs,
+                    "response": response,
+                    "decision": decision,
+                    "tool_call": last_tool_call,
+                    "tool_result": last_tool_result,
+                    "logs": logs + [f"decision: respond (step {step_index + 1})"],
+                    "plan": plan,
+                    "trace": trace,
                 }
 
-        if decision["action"] == "respond":
+            if decision.get("tool_name") == "ping":
+                ping_decisions, truncated = self._ping_decisions_from_input(user_input, decision)
+                if ping_decisions:
+                    tool_execs = [self._run_tool(ping_decision) for ping_decision in ping_decisions]
+                    last_tool_call = [item["call"] for item in tool_execs]
+                    last_tool_result = [item["result"] for item in tool_execs]
+                    prior_tool_result = last_tool_result
+                    current_step["status"] = "completed"
+                    current_step["note"] = f"Ran ping for {len(tool_execs)} targets."
+                    logs.append(f"decision: tool=ping action_class={decision['action_class']}")
+                    for item in tool_execs:
+                        preview = item["result"].get("command_preview")
+                        if isinstance(preview, str) and preview.strip():
+                            logs.append(f"command: {preview}")
+                    if len(tool_execs) > 1 and step_index + 1 >= MAX_DECISION_STEPS:
+                        return {
+                            "response": self._summarize_batch_ping(tool_execs, truncated=truncated),
+                            "decision": {"action": "tool_batch", "tool_name": "ping", "count": len(tool_execs)},
+                            "tool_call": last_tool_call,
+                            "tool_result": last_tool_result,
+                            "logs": logs,
+                            "plan": plan,
+                            "trace": trace,
+                        }
+                    continue
+
+            tool_exec = self._run_tool(decision)
+            last_tool_call = tool_exec["call"]
+            last_tool_result = tool_exec["result"]
+            prior_tool_result = last_tool_result
+            current_step["status"] = "completed"
+            current_step["note"] = "Tool executed; output ready for analysis."
+            logs.append(f"decision: tool={decision['tool_name']} action_class={decision['action_class']}")
+            preview = tool_exec["result"].get("command_preview")
+            if isinstance(preview, str) and preview.strip():
+                logs.append(f"command: {preview}")
+
+        if isinstance(last_tool_call, dict) and isinstance(last_tool_result, dict):
+            response = self._finalize_response(user_input, last_tool_call, last_tool_result)
             return {
-                "response": decision["response"],
-                "decision": decision,
-                "tool_call": None,
-                "tool_result": None,
-                "logs": [f"decision: respond"],
+                "response": response,
+                "decision": last_decision or {"action": "respond", "response": response},
+                "tool_call": last_tool_call,
+                "tool_result": last_tool_result,
+                "logs": logs + [f"decision: respond (forced after {MAX_DECISION_STEPS} steps)"],
+                "plan": plan,
+                "trace": trace,
             }
 
-        tool_exec = self._run_tool(decision)
-        response = self._finalize_response(user_input, tool_exec["call"], tool_exec["result"])
-        logs = [f"decision: tool={decision['tool_name']} action_class={decision['action_class']}"]
-        preview = tool_exec["result"].get("command_preview")
-        if isinstance(preview, str) and preview.strip():
-            logs.append(f"command: {preview}")
         return {
-            "response": response,
-            "decision": decision,
-            "tool_call": tool_exec["call"],
-            "tool_result": tool_exec["result"],
-            "logs": logs,
+            "response": "No actionable step found.",
+            "decision": last_decision or {"action": "respond", "response": "No actionable step found."},
+            "tool_call": last_tool_call,
+            "tool_result": last_tool_result,
+            "logs": logs + [f"decision: respond (no action)"],
+            "plan": plan,
+            "trace": trace,
         }
