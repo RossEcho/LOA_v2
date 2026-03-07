@@ -547,6 +547,17 @@ class AssistantCore:
                 parts.append(f"Last error: {stderr}")
         return " ".join(parts)
 
+    def _tool_exec_signature(self, tool_call: dict | list | None, tool_result: dict | list | None) -> str:
+        if isinstance(tool_result, dict):
+            preview = str(tool_result.get("command_preview") or "").strip()
+            if preview:
+                return preview
+        if isinstance(tool_call, dict):
+            name = str(tool_call.get("tool_name") or "")
+            args = tool_call.get("args")
+            return json.dumps({"tool_name": name, "args": args}, sort_keys=True)
+        return json.dumps({"tool_call": tool_call, "tool_result": self._compact_tool_result(tool_result)}, sort_keys=True)
+
     def _finalize_response(
         self,
         user_input: str,
@@ -746,13 +757,10 @@ class AssistantCore:
                     )
                     if same_tool_repeat_count >= MAX_SAME_TOOL_REPEATS:
                         logs.append(f"stopping repeated tool loop after {same_tool_repeat_count} identical tool runs")
-                        response = self._finalize_response(
-                            user_input,
-                            last_tool_call,
-                            last_tool_result,
-                            plan=plan,
-                            trace=trace,
+                        response = self._fallback_final_response(
                             tool_history=tool_history,
+                            tool_result=last_tool_result,
+                            error=RuntimeError("skipped final LLM synthesis due repeat-loop guard"),
                         )
                         return {
                             "response": response,
@@ -775,7 +783,7 @@ class AssistantCore:
             preview = tool_exec["result"].get("command_preview")
             if isinstance(preview, str) and preview.strip():
                 logs.append(f"command: {preview}")
-            signature = json.dumps({"tool_name": decision.get("tool_name"), "args": decision.get("args")}, sort_keys=True)
+            signature = self._tool_exec_signature(last_tool_call, last_tool_result)
             if signature == last_tool_signature:
                 same_tool_repeat_count += 1
             else:
@@ -790,13 +798,10 @@ class AssistantCore:
             )
             if same_tool_repeat_count >= MAX_SAME_TOOL_REPEATS:
                 logs.append(f"stopping repeated tool loop after {same_tool_repeat_count} identical tool runs")
-                response = self._finalize_response(
-                    user_input,
-                    last_tool_call,
-                    last_tool_result,
-                    plan=plan,
-                    trace=trace,
+                response = self._fallback_final_response(
                     tool_history=tool_history,
+                    tool_result=last_tool_result,
+                    error=RuntimeError("skipped final LLM synthesis due repeat-loop guard"),
                 )
                 return {
                     "response": response,

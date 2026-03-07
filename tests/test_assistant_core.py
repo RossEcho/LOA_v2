@@ -385,10 +385,11 @@ class TestAssistantCore(unittest.TestCase):
 
         assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
         result = assistant.handle_user_input("use nmap on 192.168.7.3")
-        self.assertEqual(result["response"], "nmap failed after retries")
+        self.assertIn("Execution summary:", result["response"])
+        self.assertIn("repeat-loop guard", result["response"])
         self.assertIn("repeat-loop guard", " | ".join(result.get("logs", [])))
         self.assertEqual(llm_calls["decision"], 2)
-        self.assertEqual(llm_calls["final"], 1)
+        self.assertEqual(llm_calls["final"], 0)
 
     def test_final_summary_timeout_falls_back_to_deterministic_summary(self):
         def fake_bridge(args, payload):
