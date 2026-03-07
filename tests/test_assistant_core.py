@@ -286,6 +286,34 @@ class TestAssistantCore(unittest.TestCase):
         self.assertEqual(result["tool_call"]["tool_name"], "nmap")
         init_tool_mock.assert_called_once_with("nmap")
 
+    def test_legacy_stop_action_is_normalized_to_respond(self):
+        def fake_bridge(args, payload):
+            if args == ["--list-tools"]:
+                return [
+                    {
+                        "name": "ping",
+                        "version": "1.0.0",
+                        "description": "desc",
+                        "action_class": "NETWORK",
+                        "args_schema": {"type": "object"},
+                    }
+                ]
+            return {
+                "ok": True,
+                "exit_code": 0,
+                "stdout": "ok",
+                "stderr": "",
+                "duration_ms": 5,
+                "artifacts": [],
+            }
+
+        def fake_llm(prompt, schema_path, **kwargs):
+            return json.dumps({"action": "stop", "reason": "completed"})
+
+        assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
+        result = assistant.handle_user_input("hi")
+        self.assertEqual(result["response"], "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

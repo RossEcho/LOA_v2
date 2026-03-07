@@ -263,6 +263,37 @@ class AssistantCore:
         if decision["tool_name"] not in known_tools:
             raise AssistantError(f"unknown tool in decision: {decision['tool_name']}")
 
+    def _normalize_decision(self, decision: dict) -> tuple[dict, str | None]:
+        if not isinstance(decision, dict):
+            return decision, None
+        action = decision.get("action")
+        if action in {"respond", "tool"}:
+            return decision, None
+
+        if action in {"continue", "run_tool"}:
+            decision["action"] = "tool"
+            return decision, f"normalized decision.action from '{action}' to 'tool'"
+
+        if action in {"stop", "finish"}:
+            response = decision.get("response")
+            if not isinstance(response, str) or not response.strip():
+                reason = decision.get("reason")
+                if isinstance(reason, str) and reason.strip():
+                    response = reason.strip()
+                else:
+                    response = "Done."
+                decision["response"] = response
+            decision["action"] = "respond"
+            return decision, f"normalized decision.action from '{action}' to 'respond'"
+
+        # Unknown action but usable response exists -> degrade safely to respond.
+        response = decision.get("response")
+        if isinstance(response, str) and response.strip():
+            decision["action"] = "respond"
+            return decision, f"normalized invalid decision.action '{action}' to 'respond'"
+
+        return decision, None
+
     def _is_ping_request(self, user_input: str) -> bool:
         return isinstance(user_input, str) and "ping" in user_input.lower()
 
@@ -427,6 +458,9 @@ class AssistantCore:
                 current_step=current_step,
                 prior_tool_result=prior_tool_result,
             )
+            decision, normalize_note = self._normalize_decision(decision)
+            if normalize_note:
+                logs.append(normalize_note)
             trace_item = {
                 "step_index": step_index + 1,
                 "step": current_step.get("step", ""),
