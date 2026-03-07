@@ -235,6 +235,30 @@ class AssistantCore:
         trace: list[dict] | None = None,
         tool_history: list[dict] | None = None,
     ) -> str:
+        plan_tail = (plan or [])[-3:]
+        trace_tail = (trace or [])[-3:]
+        compact_history: list[dict] = []
+        for item in (tool_history or [])[-3:]:
+            if not isinstance(item, dict):
+                continue
+            result = item.get("tool_result")
+            compact_result = result if isinstance(result, dict) else self._compact_tool_result(result)
+            if isinstance(compact_result, dict):
+                compact_result = {
+                    "ok": compact_result.get("ok"),
+                    "exit_code": compact_result.get("exit_code"),
+                    "duration_ms": compact_result.get("duration_ms"),
+                    "command_preview": compact_result.get("command_preview"),
+                    "stdout_tail": str(compact_result.get("stdout_tail", ""))[-240:],
+                    "stderr_tail": str(compact_result.get("stderr_tail", ""))[-240:],
+                }
+            compact_history.append(
+                {
+                    "step_index": item.get("step_index"),
+                    "tool_call": item.get("tool_call"),
+                    "tool_result": compact_result,
+                }
+            )
         security_scan = self._has_security_scan_context(tool_call, tool_history)
         envelope = {
             "task": "Write a concise user-facing response.",
@@ -247,10 +271,10 @@ class AssistantCore:
             ],
             "user_input": user_input,
             "tool_call": tool_call,
-            "tool_result": tool_result,
-            "plan": plan or [],
-            "trace": trace or [],
-            "tool_history": tool_history or [],
+            "tool_result": self._compact_tool_result(tool_result),
+            "plan_tail": plan_tail,
+            "trace_tail": trace_tail,
+            "tool_history_tail": compact_history,
             "security_scan_context": security_scan,
         }
         return json.dumps(envelope, ensure_ascii=False)
