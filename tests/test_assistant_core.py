@@ -535,6 +535,47 @@ class TestAssistantCore(unittest.TestCase):
         self.assertIn("decision-error fallback", " | ".join(result.get("logs", [])))
         self.assertEqual(calls["final"], 1)
 
+    def test_fallback_observations_include_nmap_host_down_conclusion(self):
+        def fake_bridge(args, payload):
+            if args == ["--list-tools"]:
+                return [
+                    {
+                        "name": "nmap",
+                        "version": "7.0",
+                        "description": "scan",
+                        "action_class": "SYSTEM",
+                        "args_schema": {"type": "object"},
+                    }
+                ]
+            return {
+                "ok": True,
+                "exit_code": 0,
+                "stdout": "Note: Host seems down. If it is really up, but blocking our ping probes, try -Pn\nNmap done: 1 IP address (0 hosts up) scanned in 3.14 seconds",
+                "stderr": "",
+                "duration_ms": 5,
+                "artifacts": [],
+                "command_preview": "nmap -sV 192.168.7.3",
+            }
+
+        def fake_llm(prompt, schema_path, **kwargs):
+            if "assistant_decision.schema.json" in str(schema_path):
+                return json.dumps(
+                    {
+                        "action": "tool",
+                        "tool_name": "nmap",
+                        "args": {"target": "192.168.7.3"},
+                        "action_class": "SYSTEM",
+                        "timeout_seconds": 3,
+                        "response": None,
+                    }
+                )
+            return json.dumps({"response": "unused"})
+
+        assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
+        result = assistant.handle_user_input("use nmap on 192.168.7.3")
+        self.assertIn("Target appears down", result["response"])
+        self.assertIn("rerun nmap with -Pn", result["response"])
+
 
 if __name__ == "__main__":
     unittest.main()

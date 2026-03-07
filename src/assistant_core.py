@@ -575,6 +575,12 @@ class AssistantCore:
             if is_nmap:
                 if re.search(r"\bhost is up\b", combined, flags=re.IGNORECASE):
                     _add("Target host appears reachable.")
+                if re.search(r"\bhost seems down\b", combined, flags=re.IGNORECASE) or re.search(
+                    r"\b0 hosts up\b", combined, flags=re.IGNORECASE
+                ):
+                    _add("Target appears down or not responding to discovery probes.")
+                if re.search(r"\btry\s+-Pn\b", combined, flags=re.IGNORECASE):
+                    _add("Recommendation: rerun nmap with -Pn to skip host discovery if probes are blocked.")
                 open_ports = re.findall(r"\b(\d+)/(tcp|udp)\s+open\s+([A-Za-z0-9._-]+)", combined, flags=re.IGNORECASE)
                 if open_ports:
                     formatted = ", ".join([f"{p}/{proto} ({svc})" for p, proto, svc in open_ports[:8]])
