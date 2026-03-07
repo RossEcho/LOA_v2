@@ -386,7 +386,7 @@ class TestAssistantCore(unittest.TestCase):
         assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
         result = assistant.handle_user_input("use nmap on 192.168.7.3")
         self.assertIn("Execution summary:", result["response"])
-        self.assertIn("repeat-loop guard", result["response"])
+        self.assertNotIn("failed to complete final analysis", result["response"])
         self.assertIn("repeat-loop guard", " | ".join(result.get("logs", [])))
         self.assertEqual(llm_calls["decision"], 2)
         self.assertEqual(llm_calls["final"], 0)
@@ -413,25 +413,30 @@ class TestAssistantCore(unittest.TestCase):
                 "command_preview": "nmap 192.168.7.3",
             }
 
+        calls = {"decision": 0}
+
         def fake_llm(prompt, schema_path, **kwargs):
             if "assistant_decision.schema.json" in str(schema_path):
-                return json.dumps(
-                    {
-                        "action": "tool",
-                        "tool_name": "nmap",
-                        "args": {"target": "192.168.7.3"},
-                        "action_class": "SYSTEM",
-                        "timeout_seconds": 3,
-                        "response": None,
-                    }
-                )
+                calls["decision"] += 1
+                if calls["decision"] == 1:
+                    return json.dumps(
+                        {
+                            "action": "tool",
+                            "tool_name": "nmap",
+                            "args": {"target": "192.168.7.3"},
+                            "action_class": "SYSTEM",
+                            "timeout_seconds": 3,
+                            "response": None,
+                        }
+                    )
+                return json.dumps({"action": "respond", "response": "Completed.", "tool_name": None, "args": None, "action_class": None, "timeout_seconds": None})
             raise TimeoutError("timed out")
 
         assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
         result = assistant.handle_user_input("use nmap on 192.168.7.3")
         self.assertIn("Execution summary:", result["response"])
         self.assertIn("Final LLM summary timed out/failed", result["response"])
-        self.assertIn("0 succeeded, 2 failed", result["response"])
+        self.assertIn("0 succeeded, 1 failed", result["response"])
 
     def test_generic_respond_after_tool_runs_is_refined_with_final_summary(self):
         def fake_bridge(args, payload):

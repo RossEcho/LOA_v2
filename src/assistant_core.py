@@ -622,6 +622,7 @@ class AssistantCore:
         tool_history: list[dict] = []
         same_tool_repeat_count = 0
         last_tool_signature: str | None = None
+        stop_reason: str | None = None
 
         for step_index in range(MAX_DECISION_STEPS):
             self._progress(f"step {step_index + 1}/{MAX_DECISION_STEPS} start")
@@ -757,20 +758,9 @@ class AssistantCore:
                     )
                     if same_tool_repeat_count >= MAX_SAME_TOOL_REPEATS:
                         logs.append(f"stopping repeated tool loop after {same_tool_repeat_count} identical tool runs")
-                        response = self._fallback_final_response(
-                            tool_history=tool_history,
-                            tool_result=last_tool_result,
-                            error=RuntimeError("skipped final LLM synthesis due repeat-loop guard"),
-                        )
-                        return {
-                            "response": response,
-                            "decision": {"action": "respond", "response": response},
-                            "tool_call": last_tool_call,
-                            "tool_result": last_tool_result,
-                            "logs": logs + [f"decision: respond (repeat-loop guard)"],
-                            "plan": plan,
-                            "trace": trace,
-                        }
+                        current_step["note"] = "Stopped due repeated identical tool execution."
+                        stop_reason = "repeat-loop guard"
+                        break
                     continue
 
             tool_exec = self._run_tool(decision)
@@ -798,20 +788,25 @@ class AssistantCore:
             )
             if same_tool_repeat_count >= MAX_SAME_TOOL_REPEATS:
                 logs.append(f"stopping repeated tool loop after {same_tool_repeat_count} identical tool runs")
-                response = self._fallback_final_response(
-                    tool_history=tool_history,
-                    tool_result=last_tool_result,
-                    error=RuntimeError("skipped final LLM synthesis due repeat-loop guard"),
-                )
-                return {
-                    "response": response,
-                    "decision": {"action": "respond", "response": response},
-                    "tool_call": last_tool_call,
-                    "tool_result": last_tool_result,
-                    "logs": logs + [f"decision: respond (repeat-loop guard)"],
-                    "plan": plan,
-                    "trace": trace,
-                }
+                current_step["note"] = "Stopped due repeated identical tool execution."
+                stop_reason = "repeat-loop guard"
+                break
+
+        if stop_reason == "repeat-loop guard":
+            response = self._fallback_final_response(
+                tool_history=tool_history,
+                tool_result=last_tool_result,
+                error=None,
+            )
+            return {
+                "response": response,
+                "decision": last_decision or {"action": "respond", "response": response},
+                "tool_call": last_tool_call,
+                "tool_result": last_tool_result,
+                "logs": logs + [f"decision: respond ({stop_reason})"],
+                "plan": plan,
+                "trace": trace,
+            }
 
         if isinstance(last_tool_call, dict) and isinstance(last_tool_result, dict):
             response = self._finalize_response(
