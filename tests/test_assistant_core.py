@@ -342,6 +342,54 @@ class TestAssistantCore(unittest.TestCase):
         result = assistant.handle_user_input("hi")
         self.assertEqual(result["response"], "all done")
 
+    def test_repeated_same_tool_call_triggers_guard(self):
+        def fake_bridge(args, payload):
+            if args == ["--list-tools"]:
+                return [
+                    {
+                        "name": "nmap",
+                        "version": "7.0",
+                        "description": "scan",
+                        "action_class": "SYSTEM",
+                        "args_schema": {"type": "object"},
+                    }
+                ]
+            return {
+                "ok": False,
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": "failed",
+                "duration_ms": 5,
+                "artifacts": [],
+                "command_preview": "nmap 192.168.7.3",
+            }
+
+        llm_calls = {"decision": 0, "final": 0}
+
+        def fake_llm(prompt, schema_path, **kwargs):
+            path = str(schema_path)
+            if "assistant_decision.schema.json" in path:
+                llm_calls["decision"] += 1
+                return json.dumps(
+                    {
+                        "action": "tool",
+                        "tool_name": "nmap",
+                        "args": {"target": "192.168.7.3"},
+                        "action_class": "SYSTEM",
+                        "timeout_seconds": 3,
+                        "response": None,
+                    }
+                )
+            llm_calls["final"] += 1
+            return json.dumps({"response": "nmap failed after retries"})
+
+        assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
+        result = assistant.handle_user_input("use nmap on 192.168.7.3")
+        self.assertEqual(result["response"], "nmap failed after retries")
+        self.assertIn("repeat-loop guard", " | ".join(result.get("logs", [])))
+        self.assertEqual(llm_calls["decision"], 2)
+        self.assertEqual(llm_calls["final"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

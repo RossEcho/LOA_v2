@@ -24,6 +24,7 @@ MAX_DECISION_STEPS = int(os.getenv("LOA_ASSISTANT_MAX_STEPS", "10"))
 DECISION_TIMEOUT_SEC = int(os.getenv("LOA_ASSISTANT_DECISION_TIMEOUT_SEC", "25"))
 FINAL_TIMEOUT_SEC = int(os.getenv("LOA_ASSISTANT_FINAL_TIMEOUT_SEC", "25"))
 STREAM_PROGRESS = os.getenv("LOA_ASSISTANT_STREAM_PROGRESS", "1") == "1" and sys.stdout.isatty()
+MAX_SAME_TOOL_REPEATS = int(os.getenv("LOA_ASSISTANT_MAX_SAME_TOOL_REPEATS", "2"))
 
 
 class AssistantError(RuntimeError):
@@ -180,6 +181,8 @@ class AssistantCore:
                 "Never invent tool names. Use only tools listed below.",
                 "Use the current step and prior tool result (if provided) to choose the next action.",
                 "If all needed work is done, return action='respond'.",
+                "Prefer the minimum number of steps needed to complete the request.",
+                "Do not repeat the same tool call unless prior result clearly requires retry.",
             ],
             "tools": tool_context,
             "user_input": user_input,
@@ -197,17 +200,30 @@ class AssistantCore:
         }
         return json.dumps(envelope, ensure_ascii=False)
 
-    def _prompt_for_final_response(self, user_input: str, tool_call: dict, tool_result: dict) -> str:
+    def _prompt_for_final_response(
+        self,
+        user_input: str,
+        tool_call: dict | list | None,
+        tool_result: dict | list | None,
+        *,
+        plan: list[dict] | None = None,
+        trace: list[dict] | None = None,
+        tool_history: list[dict] | None = None,
+    ) -> str:
         envelope = {
             "task": "Write a concise user-facing response.",
             "requirements": [
                 "Return one JSON object only with field: response.",
-                "If tool failed, explain the failure clearly.",
-                "If tool succeeded, summarize relevant output.",
+                "Summarize what happened across all executed steps.",
+                "If any tool failed, explain the failure clearly.",
+                "If retries happened, mention that briefly and conclude.",
             ],
             "user_input": user_input,
             "tool_call": tool_call,
             "tool_result": tool_result,
+            "plan": plan or [],
+            "trace": trace or [],
+            "tool_history": tool_history or [],
         }
         return json.dumps(envelope, ensure_ascii=False)
 
@@ -431,11 +447,27 @@ class AssistantCore:
             prefix += " Target list was truncated to keep execution bounded."
         return prefix + "\n" + "\n".join(details)
 
-    def _finalize_response(self, user_input: str, tool_call: dict, tool_result: dict) -> str:
+    def _finalize_response(
+        self,
+        user_input: str,
+        tool_call: dict | list | None,
+        tool_result: dict | list | None,
+        *,
+        plan: list[dict] | None = None,
+        trace: list[dict] | None = None,
+        tool_history: list[dict] | None = None,
+    ) -> str:
         started = time.perf_counter()
         self._progress(f"llm final response start (timeout={FINAL_TIMEOUT_SEC}s)")
         text = self._llm_text(
-            self._prompt_for_final_response(user_input, tool_call, tool_result),
+            self._prompt_for_final_response(
+                user_input,
+                tool_call,
+                tool_result,
+                plan=plan,
+                trace=trace,
+                tool_history=tool_history,
+            ),
             FINAL_SCHEMA_PATH,
             model_path=self.model_path,
             n_ctx=self.n_ctx,
@@ -468,6 +500,9 @@ class AssistantCore:
         last_tool_call: dict | list | None = None
         last_tool_result: dict | list | None = None
         last_decision: dict | None = None
+        tool_history: list[dict] = []
+        same_tool_repeat_count = 0
+        last_tool_signature: str | None = None
 
         for step_index in range(MAX_DECISION_STEPS):
             self._progress(f"step {step_index + 1}/{MAX_DECISION_STEPS} start")
@@ -553,6 +588,38 @@ class AssistantCore:
                             "plan": plan,
                             "trace": trace,
                         }
+                    signature = json.dumps({"tool_name": "ping", "args": [item["call"]["args"] for item in tool_execs]}, sort_keys=True)
+                    if signature == last_tool_signature:
+                        same_tool_repeat_count += 1
+                    else:
+                        same_tool_repeat_count = 1
+                    last_tool_signature = signature
+                    tool_history.append(
+                        {
+                            "step_index": step_index + 1,
+                            "tool_call": last_tool_call,
+                            "tool_result": self._compact_tool_result(last_tool_result),
+                        }
+                    )
+                    if same_tool_repeat_count >= MAX_SAME_TOOL_REPEATS:
+                        logs.append(f"stopping repeated tool loop after {same_tool_repeat_count} identical tool runs")
+                        response = self._finalize_response(
+                            user_input,
+                            last_tool_call,
+                            last_tool_result,
+                            plan=plan,
+                            trace=trace,
+                            tool_history=tool_history,
+                        )
+                        return {
+                            "response": response,
+                            "decision": {"action": "respond", "response": response},
+                            "tool_call": last_tool_call,
+                            "tool_result": last_tool_result,
+                            "logs": logs + [f"decision: respond (repeat-loop guard)"],
+                            "plan": plan,
+                            "trace": trace,
+                        }
                     continue
 
             tool_exec = self._run_tool(decision)
@@ -565,9 +632,48 @@ class AssistantCore:
             preview = tool_exec["result"].get("command_preview")
             if isinstance(preview, str) and preview.strip():
                 logs.append(f"command: {preview}")
+            signature = json.dumps({"tool_name": decision.get("tool_name"), "args": decision.get("args")}, sort_keys=True)
+            if signature == last_tool_signature:
+                same_tool_repeat_count += 1
+            else:
+                same_tool_repeat_count = 1
+            last_tool_signature = signature
+            tool_history.append(
+                {
+                    "step_index": step_index + 1,
+                    "tool_call": last_tool_call,
+                    "tool_result": self._compact_tool_result(last_tool_result),
+                }
+            )
+            if same_tool_repeat_count >= MAX_SAME_TOOL_REPEATS:
+                logs.append(f"stopping repeated tool loop after {same_tool_repeat_count} identical tool runs")
+                response = self._finalize_response(
+                    user_input,
+                    last_tool_call,
+                    last_tool_result,
+                    plan=plan,
+                    trace=trace,
+                    tool_history=tool_history,
+                )
+                return {
+                    "response": response,
+                    "decision": {"action": "respond", "response": response},
+                    "tool_call": last_tool_call,
+                    "tool_result": last_tool_result,
+                    "logs": logs + [f"decision: respond (repeat-loop guard)"],
+                    "plan": plan,
+                    "trace": trace,
+                }
 
         if isinstance(last_tool_call, dict) and isinstance(last_tool_result, dict):
-            response = self._finalize_response(user_input, last_tool_call, last_tool_result)
+            response = self._finalize_response(
+                user_input,
+                last_tool_call,
+                last_tool_result,
+                plan=plan,
+                trace=trace,
+                tool_history=tool_history,
+            )
             return {
                 "response": response,
                 "decision": last_decision or {"action": "respond", "response": response},

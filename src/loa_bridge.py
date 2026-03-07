@@ -164,25 +164,45 @@ def _build_onboarded_argv(tool_name: str, tool_path: str, spec: dict, args: dict
     argv: list[str] = [tool_path or tool_name]
     positional = list(args.get("_positional", [])) if isinstance(args.get("_positional"), list) else []
     positional_keys = {"target", "targets", "host", "hosts", "ip", "address", "destination"}
+    scan_type_keys = {"scan_type", "scan", "mode", "type"}
+    scan_type_ignored_values = {"host", "basic", "default"}
+
+    def _append_positional(value) -> None:
+        if value is None:
+            return
+        if isinstance(value, list):
+            for item in value:
+                _append_positional(item)
+            return
+        if isinstance(value, bool):
+            if value:
+                positional.append("true")
+            return
+        text = str(value).strip()
+        if not text:
+            return
+        if " " in text and any(ch in text for ch in ("-", ".", "/", ":")):
+            try:
+                parts = shlex.split(text)
+                if parts:
+                    positional.extend(parts)
+                    return
+            except Exception:
+                pass
+        positional.append(text)
+
     for key, value in args.items():
         if key == "_positional":
             continue
         if key in positional_keys:
-            if isinstance(value, list):
-                positional.extend(str(item) for item in value)
-            elif value is not None:
-                positional.append(str(value))
+            _append_positional(value)
             continue
 
         key_known = _has_option_key(spec, key)
         if not key_known:
-            if isinstance(value, list):
-                positional.extend(str(item) for item in value)
-            elif isinstance(value, bool):
-                if value:
-                    positional.append(key)
-            elif value is not None:
-                positional.append(str(value))
+            if key in scan_type_keys and str(value).strip().lower() in scan_type_ignored_values:
+                continue
+            _append_positional(value)
             continue
 
         flag = _resolve_flag(spec, key)

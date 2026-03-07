@@ -119,6 +119,39 @@ class TestLoaBridge(unittest.TestCase):
         rollback_mock.assert_not_called()
         snapshot_mock.assert_called_once()
 
+    @patch("src.loa_bridge.load_tool_spec", return_value={"options": {}})
+    @patch("src.loa_bridge.load_registry", return_value={"tools": [{"name": "nmap", "version": "7.9", "path": "/usr/bin/nmap"}]})
+    @patch("src.loa_bridge.rollback")
+    @patch("src.loa_bridge.snapshot", return_value="abc123")
+    @patch("src.loa_bridge.subprocess.run")
+    def test_dispatch_onboarded_splits_combined_positional_tokens(
+        self, run_mock, snapshot_mock, rollback_mock, _registry_mock, _spec_mock
+    ):
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=["/usr/bin/nmap", "-Pn", "192.168.7.3"],
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+        result = _dispatch_tool(
+            {
+                "tool_name": "nmap",
+                "args": {"scan_type": "host", "target": "-Pn 192.168.7.3"},
+                "cwd": None,
+                "timeout_seconds": 3,
+                "action_class": "SYSTEM",
+                "env": None,
+            }
+        )
+        self.assertTrue(result["ok"])
+        called_argv = run_mock.call_args[0][0]
+        self.assertEqual(called_argv[0], "/usr/bin/nmap")
+        self.assertIn("-Pn", called_argv)
+        self.assertIn("192.168.7.3", called_argv)
+        self.assertNotIn("host", called_argv)
+        rollback_mock.assert_not_called()
+        snapshot_mock.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
