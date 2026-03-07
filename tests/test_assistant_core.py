@@ -176,6 +176,93 @@ class TestAssistantCore(unittest.TestCase):
         self.assertEqual(calls["list_tools"], 2)
         init_tool_mock.assert_called_once_with("nmap")
 
+    @patch("src.assistant_core.init_tool", return_value={"ok": True, "processed": 2, "skipped": 0})
+    def test_add_the_tool_phrase_is_detected(self, init_tool_mock):
+        calls = {"list_tools": 0}
+
+        def fake_bridge(args, payload):
+            if args == ["--list-tools"]:
+                calls["list_tools"] += 1
+                return [
+                    {
+                        "name": "ping",
+                        "version": "1.0.0",
+                        "description": "desc",
+                        "action_class": "NETWORK",
+                        "args_schema": {"type": "object"},
+                    }
+                ]
+            raise AssertionError("unexpected bridge call")
+
+        assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=lambda *a, **k: "")
+        result = assistant.handle_user_input("add the tool nmap")
+        self.assertIn("Tool 'nmap' added.", result["response"])
+        self.assertEqual(calls["list_tools"], 2)
+        init_tool_mock.assert_called_once_with("nmap")
+
+    @patch("src.assistant_core.init_tool", return_value={"ok": True, "processed": 1, "skipped": 0})
+    def test_unknown_tool_decision_auto_onboards(self, init_tool_mock):
+        def fake_bridge(args, payload):
+            if args == ["--list-tools"]:
+                # First load only ping, second load includes nmap after onboarding.
+                if fake_bridge.calls == 0:
+                    fake_bridge.calls += 1
+                    return [
+                        {
+                            "name": "ping",
+                            "version": "1.0.0",
+                            "description": "desc",
+                            "action_class": "NETWORK",
+                            "args_schema": {"type": "object"},
+                        }
+                    ]
+                return [
+                    {
+                        "name": "ping",
+                        "version": "1.0.0",
+                        "description": "desc",
+                        "action_class": "NETWORK",
+                        "args_schema": {"type": "object"},
+                    },
+                    {
+                        "name": "nmap",
+                        "version": "7.0",
+                        "description": "scan",
+                        "action_class": "SYSTEM",
+                        "args_schema": {"type": "object"},
+                    },
+                ]
+            return {
+                "ok": True,
+                "exit_code": 0,
+                "stdout": "scan ok",
+                "stderr": "",
+                "duration_ms": 5,
+                "artifacts": [],
+            }
+
+        fake_bridge.calls = 0
+
+        def fake_llm(prompt, schema_path, **kwargs):
+            if "assistant_decision.schema.json" in str(schema_path):
+                return json.dumps(
+                    {
+                        "action": "tool",
+                        "tool_name": "nmap",
+                        "args": {"_positional": ["192.168.7.3"]},
+                        "action_class": "SYSTEM",
+                        "timeout_seconds": 3,
+                        "response": None,
+                    }
+                )
+            return json.dumps({"response": "Scan complete."})
+
+        assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
+        result = assistant.handle_user_input("use nmap on 192.168.7.3")
+        self.assertEqual(result["response"], "Scan complete.")
+        self.assertEqual(result["tool_call"]["tool_name"], "nmap")
+        init_tool_mock.assert_called_once_with("nmap")
+
 
 if __name__ == "__main__":
     unittest.main()

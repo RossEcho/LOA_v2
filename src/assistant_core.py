@@ -64,17 +64,28 @@ class AssistantCore:
         self._llm_text = llm_text_runner or run_llm_text
         self.tools = self._load_tools()
 
-    def _try_onboard_from_input(self, user_input: str) -> dict | None:
+    def _extract_tool_onboarding_request(self, user_input: str) -> str | None:
         if not isinstance(user_input, str):
             return None
-        match = re.match(r"^\s*(?:add|init)\s+tool\s+([A-Za-z0-9._+-]+)\s*$", user_input, flags=re.IGNORECASE)
+        lowered = user_input.strip().lower()
+        if "tool" not in lowered:
+            return None
+        match = re.search(
+            r"\b(?:add|install|init|initialize|onboard)\b(?:\s+\w+){0,3}?\s+\btool\b(?:\s+\w+){0,2}?\s+([A-Za-z0-9._+-]+)\b",
+            user_input,
+            flags=re.IGNORECASE,
+        )
         if not match:
             return None
+        return match.group(1).strip()
 
-        tool_name = match.group(1).strip()
+    def _try_onboard_from_input(self, user_input: str) -> dict | None:
+        tool_name = self._extract_tool_onboarding_request(user_input)
+        if not tool_name:
+            return None
+
         try:
-            result = init_tool(tool_name)
-            self.tools = self._load_tools()
+            result = self._onboard_tool(tool_name)
         except ToolOnboardingError as exc:
             return {
                 "response": f"Failed to add tool '{tool_name}': {exc}",
@@ -93,6 +104,14 @@ class AssistantCore:
             "tool_result": result,
             "logs": [f"tool onboarding: {tool_name}", "tool list refreshed"],
         }
+
+    def _onboard_tool(self, tool_name: str) -> dict:
+        try:
+            result = init_tool(tool_name)
+            self.tools = self._load_tools()
+            return result
+        except ToolOnboardingError:
+            raise
 
     def _load_tools(self) -> list[dict]:
         payload = self._bridge_json(["--list-tools"], None)
@@ -307,7 +326,22 @@ class AssistantCore:
             return onboarding_result
 
         decision = self._decide(user_input)
-        self._validate_decision(decision)
+        try:
+            self._validate_decision(decision)
+        except AssistantError as exc:
+            unknown_prefix = "unknown tool in decision: "
+            if isinstance(decision, dict) and str(exc).startswith(unknown_prefix):
+                tool_name = str(decision.get("tool_name", "")).strip()
+                if tool_name:
+                    try:
+                        self._onboard_tool(tool_name)
+                        self._validate_decision(decision)
+                    except ToolOnboardingError as onboarding_exc:
+                        raise AssistantError(f"unknown tool in decision: {tool_name} (auto-onboard failed: {onboarding_exc})") from onboarding_exc
+                else:
+                    raise
+            else:
+                raise
 
         if self._is_ping_request(user_input):
             ping_decisions: list[dict] = []
