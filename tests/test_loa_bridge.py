@@ -227,6 +227,73 @@ class TestLoaBridge(unittest.TestCase):
         rollback_mock.assert_not_called()
         snapshot_mock.assert_called_once()
 
+    @patch("src.loa_bridge.rollback")
+    @patch("src.loa_bridge.snapshot", return_value="abc123")
+    @patch("src.loa_bridge.subprocess.run")
+    def test_dispatch_permission_denied_retries_with_su(self, run_mock, snapshot_mock, rollback_mock):
+        run_mock.side_effect = [
+            subprocess.CompletedProcess(
+                args=["bash", "tools/ping/ping.sh", "8.8.8.8", "1"],
+                returncode=1,
+                stdout="",
+                stderr="Permission denied",
+            ),
+            subprocess.CompletedProcess(
+                args=["su", "-c", "bash tools/ping/ping.sh 8.8.8.8 1"],
+                returncode=0,
+                stdout="ok-from-su",
+                stderr="",
+            ),
+        ]
+        result = _dispatch_tool(
+            {
+                "tool_name": "ping",
+                "args": {"target": "8.8.8.8", "count": 1},
+                "cwd": None,
+                "timeout_seconds": 3,
+                "action_class": "NETWORK",
+                "env": None,
+            }
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stdout"], "ok-from-su")
+        self.assertIn("su", result["command_preview"])
+        rollback_mock.assert_not_called()
+        snapshot_mock.assert_called_once()
+
+    @patch("src.loa_bridge.rollback")
+    @patch("src.loa_bridge.snapshot", return_value="abc123")
+    @patch("src.loa_bridge.subprocess.run")
+    def test_dispatch_permission_denied_su_failure_keeps_error(self, run_mock, snapshot_mock, rollback_mock):
+        run_mock.side_effect = [
+            subprocess.CompletedProcess(
+                args=["bash", "tools/ping/ping.sh", "8.8.8.8", "1"],
+                returncode=1,
+                stdout="",
+                stderr="Permission denied",
+            ),
+            subprocess.CompletedProcess(
+                args=["su", "-c", "bash tools/ping/ping.sh 8.8.8.8 1"],
+                returncode=1,
+                stdout="",
+                stderr="su auth failed",
+            ),
+        ]
+        result = _dispatch_tool(
+            {
+                "tool_name": "ping",
+                "args": {"target": "8.8.8.8", "count": 1},
+                "cwd": None,
+                "timeout_seconds": 3,
+                "action_class": "NETWORK",
+                "env": None,
+            }
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("SU retry failed", result["stderr"])
+        rollback_mock.assert_called_once_with("abc123")
+        snapshot_mock.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
