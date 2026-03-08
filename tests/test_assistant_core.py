@@ -285,6 +285,30 @@ class TestAssistantCore(unittest.TestCase):
         init_tool_mock.assert_called_once_with("nmap")
 
     @patch("src.assistant_core.init_tool", return_value={"ok": True, "processed": 1, "skipped": 0})
+    def test_add_toll_typo_is_detected(self, init_tool_mock):
+        calls = {"list_tools": 0}
+
+        def fake_bridge(args, payload):
+            if args == ["--list-tools"]:
+                calls["list_tools"] += 1
+                return [
+                    {
+                        "name": "ping",
+                        "version": "1.0.0",
+                        "description": "desc",
+                        "action_class": "NETWORK",
+                        "args_schema": {"type": "object"},
+                    }
+                ]
+            raise AssertionError("unexpected bridge call")
+
+        assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=lambda *a, **k: "")
+        result = assistant.handle_user_input("add toll tshark")
+        self.assertIn("Tool 'tshark' added.", result["response"])
+        self.assertEqual(calls["list_tools"], 2)
+        init_tool_mock.assert_called_once_with("tshark")
+
+    @patch("src.assistant_core.init_tool", return_value={"ok": True, "processed": 1, "skipped": 0})
     def test_unknown_tool_decision_auto_onboards(self, init_tool_mock):
         llm_calls = {"count": 0}
 

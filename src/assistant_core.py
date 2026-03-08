@@ -75,10 +75,10 @@ class AssistantCore:
         if not isinstance(user_input, str):
             return None
         lowered = user_input.strip().lower()
-        if "tool" not in lowered:
+        if "tool" not in lowered and "toll" not in lowered:
             return None
         match = re.search(
-            r"\b(?:add|install|init|initialize|onboard)\b(?:\s+\w+){0,3}?\s+\btool\b(?:\s+\w+){0,2}?\s+([A-Za-z0-9._+-]+)\b",
+            r"\b(?:add|install|init|initialize|onboard)\b(?:\s+\w+){0,3}?\s+\b(?:tool|toll)\b(?:\s+\w+){0,2}?\s+([A-Za-z0-9._+-]+)\b",
             user_input,
             flags=re.IGNORECASE,
         )
@@ -531,48 +531,64 @@ class AssistantCore:
             stderr = str(result.get("stderr") or "").strip().lower()
             return bool(stderr) and any(marker in stderr for marker in failure_markers)
 
-        runs = 0
-        success = 0
-        failed = 0
+        def _iter_runs() -> list[dict]:
+            runs_local: list[dict] = []
+            for entry in tool_history or []:
+                if not isinstance(entry, dict):
+                    continue
+                call = entry.get("tool_call")
+                result = entry.get("tool_result")
+                if isinstance(call, dict) and isinstance(result, dict):
+                    runs_local.append({"call": call, "result": result})
+                elif isinstance(call, list) and isinstance(result, list):
+                    for idx, item in enumerate(result):
+                        if isinstance(item, dict):
+                            call_item = call[idx] if idx < len(call) and isinstance(call[idx], dict) else {}
+                            runs_local.append({"call": call_item, "result": item})
+                elif isinstance(result, dict):
+                    runs_local.append({"call": call if isinstance(call, dict) else {}, "result": result})
+            if runs_local:
+                return runs_local
+            if isinstance(tool_result, dict):
+                return [{"call": {}, "result": tool_result}]
+            if isinstance(tool_result, list):
+                return [{"call": {}, "result": item} for item in tool_result if isinstance(item, dict)]
+            return []
 
-        for entry in tool_history or []:
-            if not isinstance(entry, dict):
-                continue
-            result = entry.get("tool_result")
-            if isinstance(result, dict):
-                runs += 1
-                if _result_failed(result):
-                    failed += 1
-                else:
-                    success += 1
-            elif isinstance(result, list):
-                for item in result:
-                    if isinstance(item, dict):
-                        runs += 1
-                        if _result_failed(item):
-                            failed += 1
-                        else:
-                            success += 1
-
-        if isinstance(tool_result, dict) and runs == 0:
-            if _result_failed(tool_result):
-                failed = 1
-            else:
-                success = 1
-            runs = 1
-        elif isinstance(tool_result, list) and runs == 0:
-            for item in tool_result:
-                if isinstance(item, dict):
-                    runs += 1
-                    if _result_failed(item):
-                        failed += 1
-                    else:
-                        success += 1
+        run_items = _iter_runs()
+        runs = len(run_items)
+        success = sum(1 for item in run_items if not _result_failed(item.get("result")))
+        failed = runs - success
 
         parts = [f"Execution summary: {runs} tool step(s), {success} succeeded, {failed} failed."]
         if error is not None:
             parts.append(f"Overall status: failed to complete final analysis.")
             parts.append(f"Final LLM summary timed out/failed: {error}.")
+        if run_items:
+            detail_lines: list[str] = []
+            for idx, item in enumerate(run_items[:8], start=1):
+                call = item.get("call") if isinstance(item.get("call"), dict) else {}
+                result = item.get("result") if isinstance(item.get("result"), dict) else {}
+                cmd = str(result.get("command_preview") or "").strip() or str(call.get("tool_name") or "tool")
+                status = "failed" if _result_failed(result) else "ok"
+                tool_name = str(call.get("tool_name") or "").lower()
+                combined = f"{result.get('stdout','')}\n{result.get('stdout_tail','')}\n{result.get('stderr','')}\n{result.get('stderr_tail','')}"
+                obs = ""
+                if tool_name == "nmap" or " nmap" in f" {cmd.lower()}":
+                    if re.search(r"\bhost seems down\b|\b0 hosts up\b", combined, flags=re.IGNORECASE):
+                        obs = "host appears down/unresponsive"
+                    elif re.search(r"\bhost is up\b", combined, flags=re.IGNORECASE):
+                        obs = "host appears up"
+                    else:
+                        open_ports = re.findall(r"\b(\d+)/(tcp|udp)\s+open\s+([A-Za-z0-9._-]+)", combined, flags=re.IGNORECASE)
+                        if open_ports:
+                            obs = "open ports: " + ", ".join([f"{p}/{proto}({svc})" for p, proto, svc in open_ports[:5]])
+                if not obs:
+                    err = str(result.get("stderr") or result.get("stderr_tail") or "").strip()
+                    if err:
+                        obs = err.splitlines()[0]
+                detail_lines.append(f"#{idx} [{status}] {cmd}" + (f" -> {obs}" if obs else ""))
+            parts.append("Tool results: " + " | ".join(detail_lines))
         observations = self._derive_tool_observations(tool_history, tool_result)
         if observations:
             parts.append("Observations: " + " | ".join(observations))

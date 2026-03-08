@@ -10,6 +10,7 @@ class TestLoaBridge(unittest.TestCase):
         tools = _list_tools()
         names = {tool["name"] for tool in tools}
         self.assertIn("ping", names)
+        self.assertIn("tool_onboard", names)
 
     @patch("src.loa_bridge.load_registry", return_value={"tools": [{"name": "python", "version": "3.12", "path": "/usr/bin/python"}]})
     def test_list_tools_includes_onboarded(self, _registry_mock):
@@ -86,6 +87,22 @@ class TestLoaBridge(unittest.TestCase):
         self.assertFalse(result["ok"])
         rollback_mock.assert_called_once_with("abc123")
         snapshot_mock.assert_called_once()
+
+    @patch("src.loa_bridge.init_tool", return_value={"ok": True, "processed": 1, "skipped": 0})
+    def test_dispatch_tool_onboard(self, init_tool_mock):
+        result = _dispatch_tool(
+            {
+                "tool_name": "tool_onboard",
+                "args": {"tool_name": "tshark"},
+                "cwd": None,
+                "timeout_seconds": 3,
+                "action_class": "SYSTEM",
+                "env": None,
+            }
+        )
+        self.assertTrue(result["ok"])
+        self.assertIn("tool_name", result["stdout"])
+        init_tool_mock.assert_called_once_with("tshark")
 
     @patch("src.loa_bridge.rollback")
     @patch("src.loa_bridge.snapshot", return_value="abc123")

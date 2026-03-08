@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.orchestrator.tools import ToolValidationError, get_tool, list_execution_tools, validate_tool_args
 from src.savestate_git import rollback, snapshot
-from src.tool_onboarding import load_registry, load_tool_spec
+from src.tool_onboarding import init_tool, load_registry, load_tool_spec
 
 ACTION_CLASSES = {"READ", "WRITE", "NETWORK", "SYSTEM"}
 
@@ -121,6 +121,21 @@ def _list_tools() -> list[dict]:
                 "usage": entry.get("usage", f"{name} [options]"),
             }
         )
+    merged.append(
+        {
+            "name": "tool_onboard",
+            "version": "1.0.0",
+            "description": "Onboard a CLI tool by reading '<tool> -h' and generating local JSON cheat sheets.",
+            "action_class": "SYSTEM",
+            "args_schema": {
+                "type": "object",
+                "required": ["tool_name"],
+                "properties": {"tool_name": {"type": "string", "minLength": 1}},
+                "additionalProperties": False,
+            },
+            "usage": "tool_onboard --tool_name <tool>",
+        }
+    )
     return merged
 
 
@@ -248,6 +263,24 @@ def _build_onboarded_argv(tool_name: str, tool_path: str, spec: dict, args: dict
 
 def _dispatch_tool(call: dict) -> dict:
     validated = _validate_call(call)
+    if validated["tool_name"] == "tool_onboard":
+        tool_name = str(validated["args"].get("tool_name", "")).strip()
+        if not tool_name:
+            return _error_result("missing required args: tool_name", exit_code=2)
+        try:
+            onboard = init_tool(tool_name)
+            return {
+                "ok": True,
+                "exit_code": 0,
+                "stdout": json.dumps({"tool_name": tool_name, **onboard}, ensure_ascii=False),
+                "stderr": "",
+                "duration_ms": 0,
+                "artifacts": [],
+                "command_preview": f"tool_onboard {shlex.quote(tool_name)}",
+            }
+        except Exception as exc:
+            return _error_result(f"tool onboarding failed: {exc}", exit_code=2)
+
     tool = None
     argv: list[str]
     tool_name = validated["tool_name"]
