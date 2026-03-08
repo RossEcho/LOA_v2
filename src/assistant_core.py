@@ -23,6 +23,7 @@ ACTION_CLASSES = {"READ", "WRITE", "NETWORK", "SYSTEM"}
 MAX_DECISION_STEPS = int(os.getenv("LOA_ASSISTANT_MAX_STEPS", "10"))
 DECISION_TIMEOUT_SEC = int(os.getenv("LOA_ASSISTANT_DECISION_TIMEOUT_SEC", "25"))
 FINAL_TIMEOUT_SEC = int(os.getenv("LOA_ASSISTANT_FINAL_TIMEOUT_SEC", "25"))
+DECISION_RETRIES = int(os.getenv("LOA_ASSISTANT_DECISION_RETRIES", "1"))
 STREAM_PROGRESS = os.getenv("LOA_ASSISTANT_STREAM_PROGRESS", "1") == "1" and sys.stdout.isatty()
 MAX_SAME_TOOL_REPEATS = int(os.getenv("LOA_ASSISTANT_MAX_SAME_TOOL_REPEATS", "2"))
 
@@ -287,29 +288,43 @@ class AssistantCore:
         current_step: dict | None = None,
         prior_tool_result: dict | list | None = None,
     ) -> dict:
-        started = time.perf_counter()
-        self._progress(f"llm decision start (timeout={DECISION_TIMEOUT_SEC}s)")
-        text = self._llm_text(
-            self._prompt_for_decision(
-                user_input,
-                plan=plan,
-                current_step=current_step,
-                prior_tool_result=prior_tool_result,
-            ),
-            DECISION_SCHEMA_PATH,
-            model_path=self.model_path,
-            n_ctx=self.n_ctx,
-            temp=self.temp,
-            seed=self.seed,
-            log_dir=None,
-            timeout_sec_override=DECISION_TIMEOUT_SEC,
-        )
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        self._progress(f"llm decision done ({elapsed_ms} ms)")
-        decision = extract_json_object(text)
-        if not isinstance(decision, dict):
-            raise AssistantError("decision must be a JSON object")
-        return decision
+        last_exc: Exception | None = None
+        for attempt in range(DECISION_RETRIES + 1):
+            started = time.perf_counter()
+            suffix = f" attempt {attempt + 1}/{DECISION_RETRIES + 1}" if DECISION_RETRIES > 0 else ""
+            self._progress(f"llm decision start (timeout={DECISION_TIMEOUT_SEC}s{suffix})")
+            try:
+                text = self._llm_text(
+                    self._prompt_for_decision(
+                        user_input,
+                        plan=plan,
+                        current_step=current_step,
+                        prior_tool_result=prior_tool_result,
+                    ),
+                    DECISION_SCHEMA_PATH,
+                    model_path=self.model_path,
+                    n_ctx=self.n_ctx,
+                    temp=self.temp,
+                    seed=self.seed,
+                    log_dir=None,
+                    timeout_sec_override=DECISION_TIMEOUT_SEC,
+                )
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                self._progress(f"llm decision done ({elapsed_ms} ms)")
+                decision = extract_json_object(text)
+                if not isinstance(decision, dict):
+                    raise AssistantError("decision must be a JSON object")
+                return decision
+            except Exception as exc:
+                last_exc = exc
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                self._progress(f"llm decision failed ({elapsed_ms} ms): {exc}")
+                if attempt >= DECISION_RETRIES:
+                    raise
+                time.sleep(0.2)
+        if last_exc is not None:
+            raise last_exc
+        raise AssistantError("decision generation failed")
 
     def _validate_decision(self, decision: dict) -> None:
         action = decision.get("action")
@@ -516,7 +531,7 @@ class AssistantCore:
             stderr = str(result.get("stderr") or "").strip().lower()
             return bool(stderr) and any(marker in stderr for marker in failure_markers)
 
-        runs = len(tool_history or [])
+        runs = 0
         success = 0
         failed = 0
 
@@ -525,10 +540,19 @@ class AssistantCore:
                 continue
             result = entry.get("tool_result")
             if isinstance(result, dict):
+                runs += 1
                 if _result_failed(result):
                     failed += 1
                 else:
                     success += 1
+            elif isinstance(result, list):
+                for item in result:
+                    if isinstance(item, dict):
+                        runs += 1
+                        if _result_failed(item):
+                            failed += 1
+                        else:
+                            success += 1
 
         if isinstance(tool_result, dict) and runs == 0:
             if _result_failed(tool_result):
@@ -536,6 +560,14 @@ class AssistantCore:
             else:
                 success = 1
             runs = 1
+        elif isinstance(tool_result, list) and runs == 0:
+            for item in tool_result:
+                if isinstance(item, dict):
+                    runs += 1
+                    if _result_failed(item):
+                        failed += 1
+                    else:
+                        success += 1
 
         parts = [f"Execution summary: {runs} tool step(s), {success} succeeded, {failed} failed."]
         if error is not None:
@@ -606,9 +638,17 @@ class AssistantCore:
             result = entry.get("tool_result")
             if isinstance(result, dict):
                 _from_result(result, tool_name=tool_name if isinstance(tool_name, str) else None)
+            elif isinstance(result, list):
+                for item in result:
+                    if isinstance(item, dict):
+                        _from_result(item, tool_name=tool_name if isinstance(tool_name, str) else None)
 
         if isinstance(tool_result, dict):
             _from_result(tool_result)
+        elif isinstance(tool_result, list):
+            for item in tool_result:
+                if isinstance(item, dict):
+                    _from_result(item)
 
         return observations[:6]
 

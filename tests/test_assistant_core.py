@@ -165,6 +165,74 @@ class TestAssistantCore(unittest.TestCase):
         self.assertEqual(calls[0]["args"]["target"], "8.8.8.8")
         self.assertEqual(calls[1]["args"]["target"], "8.8.4.4")
 
+    def test_ping_repeat_guard_summary_counts_batch_results(self):
+        def fake_bridge(args, payload):
+            if args == ["--list-tools"]:
+                return [
+                    {
+                        "name": "ping",
+                        "version": "1.0.0",
+                        "description": "desc",
+                        "action_class": "NETWORK",
+                        "args_schema": {"type": "object"},
+                    }
+                ]
+            return {
+                "ok": True,
+                "exit_code": 0,
+                "stdout": "pong",
+                "stderr": "",
+                "duration_ms": 5,
+                "artifacts": [],
+                "command_preview": "ping 8.8.8.8",
+            }
+
+        def fake_llm(prompt, schema_path, **kwargs):
+            if "assistant_decision.schema.json" in str(schema_path):
+                return json.dumps(
+                    {
+                        "action": "tool",
+                        "tool_name": "ping",
+                        "args": {"target": "8.8.8.8"},
+                        "action_class": "NETWORK",
+                        "timeout_seconds": 3,
+                        "response": None,
+                    }
+                )
+            return json.dumps({"response": "unused"})
+
+        assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
+        result = assistant.handle_user_input("ping 8.8.8.8")
+        self.assertIn("Execution summary:", result["response"])
+        self.assertIn("2 succeeded", result["response"])
+
+    def test_decision_retries_once_after_timeout(self):
+        calls = {"decision": 0}
+
+        def fake_bridge(args, payload):
+            return [
+                {
+                    "name": "ping",
+                    "version": "1.0.0",
+                    "description": "desc",
+                    "action_class": "NETWORK",
+                    "args_schema": {"type": "object"},
+                }
+            ]
+
+        def fake_llm(prompt, schema_path, **kwargs):
+            if "assistant_decision.schema.json" in str(schema_path):
+                calls["decision"] += 1
+                if calls["decision"] == 1:
+                    raise TimeoutError("timed out")
+                return json.dumps({"action": "respond", "response": "ok", "tool_name": None, "args": None, "action_class": None, "timeout_seconds": None})
+            return json.dumps({"response": "ok"})
+
+        assistant = AssistantCore(bridge_json_runner=fake_bridge, llm_text_runner=fake_llm)
+        result = assistant.handle_user_input("hi")
+        self.assertEqual(result["response"], "ok")
+        self.assertEqual(calls["decision"], 2)
+
     @patch("src.assistant_core.init_tool", return_value={"ok": True, "processed": 3, "skipped": 1})
     def test_add_tool_command_onboards_and_refreshes_tools(self, init_tool_mock):
         calls = {"list_tools": 0}
